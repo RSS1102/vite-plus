@@ -123,6 +123,19 @@ impl JsExecutor {
         cmd
     }
 
+    /// Keep the child's `process.env.PWD` consistent with its spawn cwd.
+    ///
+    /// Node tools commonly read `process.env.PWD`, but a plain subprocess
+    /// inherits ours, which a `-C <dir>` target does not update (mutating our
+    /// own `PWD` is unsound under the multi-threaded runtime). Setting it here
+    /// from the resolved cwd delivers the target without any global env change.
+    fn sync_child_pwd(cmd: &mut Command, project_path: &AbsolutePath) {
+        #[cfg(unix)]
+        cmd.env("PWD", project_path.as_path());
+        #[cfg(not(unix))]
+        let _ = (cmd, project_path);
+    }
+
     /// Get the CLI's package.json directory (parent of `scripts_dir`).
     ///
     /// This is used for resolving the CLI's default Node.js version
@@ -305,6 +318,7 @@ impl JsExecutor {
 
         let mut cmd = Self::create_js_command(&node_binary, &bin_prefix);
         cmd.arg(entry_point.as_path()).args(args).current_dir(project_path.as_path());
+        Self::sync_child_pwd(&mut cmd, project_path);
 
         Ok(vite_command::execute_with_terminal_guard(cmd).await?)
     }
@@ -354,6 +368,7 @@ impl JsExecutor {
         if let Some(raw_subcommand) = &self.raw_subcommand {
             cmd.env(vite_shared::env_vars::VP_RAW_SUBCOMMAND, raw_subcommand);
         }
+        Self::sync_child_pwd(&mut cmd, project_path);
         Ok(cmd)
     }
 
