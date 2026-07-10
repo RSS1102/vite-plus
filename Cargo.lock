@@ -8316,6 +8316,7 @@ version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64-simd",
  "clap",
  "cow-utils",
  "fspy",
@@ -8331,6 +8332,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
  "vite_command",
  "vite_error",
  "vite_install",
