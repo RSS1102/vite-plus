@@ -826,7 +826,7 @@ fn delegated_help_doc(command: &str) -> Option<HelpDoc> {
                             "Run tasks without dependency ordering (unlimited concurrency by default)",
                         ),
                         row("--last-details", "Display the detailed summary of the last run"),
-                        row("-h, --help", "Print help (see more with '--help')"),
+                        row("-h, --help", "Print help"),
                     ],
                 ),
                 section_lines(
@@ -874,7 +874,7 @@ fn delegated_help_doc(command: &str) -> Option<HelpDoc> {
                         row("--reverse", "Reverse execution order"),
                         row("--resume-from <RESUME_FROM>", "Resume from a specific package"),
                         row("--report-summary", "Save results to vp-exec-summary.json"),
-                        row("-h, --help", "Print help (see more with '--help')"),
+                        row("-h, --help", "Print help"),
                     ],
                 ),
                 section_lines(
