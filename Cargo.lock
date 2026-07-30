@@ -8339,6 +8339,7 @@ dependencies = [
  "vite_migration",
  "vite_path",
  "vite_pm_cli",
+ "vite_select",
  "vite_shared",
  "vite_static_config",
  "vite_str",
