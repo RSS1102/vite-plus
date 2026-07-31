@@ -7,7 +7,6 @@ not fail the command. Bare vp build falls through and runs in place.
 ## `cd spread && vp build`
 
 ```
-vite <version> building client environment for production...
 ✓ 2 modules transformed.
 computing gzip size...
 dist/index.html  <size> kB │ gzip: <size> kB

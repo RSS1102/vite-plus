@@ -9,7 +9,6 @@ defaultPackage is not a static string literal.
 
 ```
 note: vp build: using ./frontend (defaultPackage)
-vite <version> building client environment for production...
 ✓ 2 modules transformed.
 computing gzip size...
 dist/index.html  <size> kB │ gzip: <size> kB

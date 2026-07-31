@@ -8,7 +8,6 @@ must be honored. vp builds ./frontend, not the wrapper root.
 
 ```
 note: vp build: using ./frontend (defaultPackage)
-vite <version> building client environment for production...
 ✓ 2 modules transformed.
 computing gzip size...
 dist/index.html  <size> kB │ gzip: <size> kB

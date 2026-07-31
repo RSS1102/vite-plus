@@ -34,7 +34,6 @@ Select a package to build (↑/↓, Enter to run, type to search): web
 note: You are running `vp build` as a Vite+ built-in command. If you meant to run the build npm script, use `vpr build` instead.
 Selected package: web (apps/web)
 Tip: run this directly with `vp -C apps/web build`
-vite <version> building client environment for production...
 ✓ 2 modules transformed.
 computing gzip size...
 dist/index.html  <size> kB │ gzip: <size> kB

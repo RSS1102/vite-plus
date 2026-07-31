@@ -7,7 +7,6 @@ runnable root, a member present), but -c lib.config.ts builds the lib.
 ## `vp build -c lib.config.ts`
 
 ```
-vite <version> building client environment for production...
 ✓ 2 modules transformed.
 computing gzip size...
 dist/lib.js  <size> kB │ gzip: <size> kB

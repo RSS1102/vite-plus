@@ -9,7 +9,6 @@ place, not elicit the members, even with a member present.
 ```
 VITE+ - The Unified Toolchain for the Web
 
-vite <version> building client environment for production...
 ✓ 2 modules transformed.
 computing gzip size...
 dist/index.js  <size> kB │ gzip: <size> kB

@@ -8,7 +8,6 @@ interactive terminal: no picker, no Selected line, no listing
 ## `vp build`
 
 ```
-vite <version> building client environment for production...
 ✓ 2 modules transformed.
 computing gzip size...
 dist/index.html  <size> kB │ gzip: <size> kB

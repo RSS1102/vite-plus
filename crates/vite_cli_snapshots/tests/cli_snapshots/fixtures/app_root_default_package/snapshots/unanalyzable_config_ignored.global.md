@@ -9,7 +9,6 @@ not fail the command. Bare vp build falls through and runs in place.
 ```
 VITE+ - The Unified Toolchain for the Web
 
-vite <version> building client environment for production...
 ✓ 2 modules transformed.
 computing gzip size...
 dist/index.html  <size> kB │ gzip: <size> kB

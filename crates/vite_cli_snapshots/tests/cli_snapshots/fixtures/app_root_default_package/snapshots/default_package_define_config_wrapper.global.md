@@ -9,7 +9,6 @@ honored: the wrapper on the defineConfig argument is unwrapped too.
 VITE+ - The Unified Toolchain for the Web
 
 note: vp build: using ./frontend (defaultPackage)
-vite <version> building client environment for production...
 ✓ 2 modules transformed.
 computing gzip size...
 dist/index.html  <size> kB │ gzip: <size> kB

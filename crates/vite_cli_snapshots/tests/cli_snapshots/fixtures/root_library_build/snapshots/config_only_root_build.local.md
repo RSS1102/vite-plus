@@ -7,7 +7,6 @@ place, not elicit the members, even with a member present.
 ## `vp build`
 
 ```
-vite <version> building client environment for production...
 ✓ 2 modules transformed.
 computing gzip size...
 dist/index.js  <size> kB │ gzip: <size> kB

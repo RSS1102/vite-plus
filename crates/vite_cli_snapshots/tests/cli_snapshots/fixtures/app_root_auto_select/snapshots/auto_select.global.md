@@ -12,7 +12,6 @@ VITE+ - The Unified Toolchain for the Web
 
 Selected package: web (apps/web)
 Tip: run this directly with `vp -C apps/web build`
-vite <version> building client environment for production...
 ✓ 2 modules transformed.
 computing gzip size...
 dist/index.html  <size> kB │ gzip: <size> kB

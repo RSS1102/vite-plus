@@ -10,7 +10,6 @@ interactive terminal: no picker, no Selected line, no listing
 ```
 VITE+ - The Unified Toolchain for the Web
 
-vite <version> building client environment for production...
 ✓ 2 modules transformed.
 computing gzip size...
 dist/index.html  <size> kB │ gzip: <size> kB
