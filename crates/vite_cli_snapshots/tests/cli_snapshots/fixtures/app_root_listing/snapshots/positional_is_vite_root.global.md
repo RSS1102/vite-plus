@@ -10,6 +10,7 @@ elicitation lines (rfcs/cwd-flag.md).
 ```
 VITE+ - The Unified Toolchain for the Web
 
+note: You are running `vp build` as a Vite+ built-in command. If you meant to run the build npm script, use `vpr build` instead.
 vite <version> building client environment for production...
 ✓ 2 modules transformed.
 computing gzip size...

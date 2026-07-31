@@ -11,6 +11,7 @@ Ctrl+C in the package picker cancels with exit 130 and runs nothing.
 ```
 VITE+ - The Unified Toolchain for the Web
 
+note: You are running `vp build` as a Vite+ built-in command. If you meant to run the build npm script, use `vpr build` instead.
 Select a package to build (↑/↓, Enter to run, type to search):
 
   › admin apps/admin
@@ -22,4 +23,6 @@ Select a package to build (↑/↓, Enter to run, type to search):
 
 ```
 VITE+ - The Unified Toolchain for the Web
+
+note: You are running `vp build` as a Vite+ built-in command. If you meant to run the build npm script, use `vpr build` instead.
 ```

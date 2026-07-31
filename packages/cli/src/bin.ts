@@ -42,8 +42,7 @@ function getErrorMessage(err: unknown): string {
 }
 
 // Parse command line arguments
-const typedArgs = process.argv.slice(2);
-let args = typedArgs;
+let args = process.argv.slice(2);
 
 // Global `-C <dir>` flag: run as if vp was started in <dir>. The global Rust
 // CLI parses this itself and spawns bin.js with the target cwd already set;
@@ -88,6 +87,12 @@ if (path.basename(process.argv[1] ?? '') === 'vpr') {
   process.argv = process.argv.slice(0, 2).concat(args);
 }
 
+// The list the Rust CLI parses: after the -C and vpr rewrites above (both
+// are consumed/settled here), before the help transform below (the Rust CLI
+// applies `help [command]` itself and needs the untransformed list to tell
+// `vp help fmt` apart from `vp fmt --help`).
+const rustCliArgs = args;
+
 // Transform `vp help [command]` into `vp [command] --help`
 if (args[0] === 'help' && args[1]) {
   args = [args[1], '--help', ...args.slice(2)];
@@ -131,9 +136,7 @@ if (command === 'create') {
       test,
       doc,
       resolveUniversalViteConfig,
-      // The Rust CLI applies the `help [command]` transform itself, and needs
-      // the untransformed list to tell `vp help fmt` apart from `vp fmt --help`.
-      args: typedArgs,
+      args: rustCliArgs,
     });
 
     let finalExitCode = exitCode;
