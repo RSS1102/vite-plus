@@ -108,7 +108,7 @@ impl SubcommandResolver {
                         .collect(),
                     cache_config: UserCacheConfig::with_config(EnabledCacheConfig {
                         env: Some(Box::new([Str::from("OXLINT_TSGOLINT_PATH")])),
-                        untracked_env: None,
+                        untracked_env: Some(vec![Str::from("VITE_CONFIG_NATIVE_IGNORE_WARNING")]),
                         input: None,
                         output: None,
                     }),
@@ -144,7 +144,7 @@ impl SubcommandResolver {
                         .collect(),
                     cache_config: UserCacheConfig::with_config(EnabledCacheConfig {
                         env: None,
-                        untracked_env: None,
+                        untracked_env: Some(vec![Str::from("VITE_CONFIG_NATIVE_IGNORE_WARNING")]),
                         input: None,
                         output: None,
                     }),
@@ -173,7 +173,7 @@ impl SubcommandResolver {
                     // the fingerprint at runtime.
                     cache_config: UserCacheConfig::with_config(EnabledCacheConfig {
                         env: None,
-                        untracked_env: None,
+                        untracked_env: Some(vec![Str::from("VITE_CONFIG_NATIVE_IGNORE_WARNING")]),
                         input: None,
                         output: None,
                     }),
@@ -199,7 +199,7 @@ impl SubcommandResolver {
                     args: iter::once(Str::from(js_path_str)).chain(vitest_args).collect(),
                     cache_config: UserCacheConfig::with_config(EnabledCacheConfig {
                         env: None,
-                        untracked_env: None,
+                        untracked_env: Some(vec![Str::from("VITE_CONFIG_NATIVE_IGNORE_WARNING")]),
                         input: Some(vec![
                             UserInputEntry::Auto(AutoTracking { auto: true }),
                             exclude_glob(
@@ -227,7 +227,7 @@ impl SubcommandResolver {
                         .collect(),
                     cache_config: UserCacheConfig::with_config(EnabledCacheConfig {
                         env: None,
-                        untracked_env: None,
+                        untracked_env: Some(vec![Str::from("VITE_CONFIG_NATIVE_IGNORE_WARNING")]),
                         input: Some(build_pack_cache_inputs()),
                         output: None,
                     }),
@@ -285,7 +285,7 @@ impl SubcommandResolver {
                         .collect(),
                     cache_config: UserCacheConfig::with_config(EnabledCacheConfig {
                         env: None,
-                        untracked_env: None,
+                        untracked_env: Some(vec![Str::from("VITE_CONFIG_NATIVE_IGNORE_WARNING")]),
                         input: None,
                         output: None,
                     }),
@@ -337,6 +337,16 @@ fn merge_resolved_envs(
     for (k, v) in resolved_envs {
         envs.entry(Arc::from(OsStr::new(&k))).or_insert_with(|| Arc::from(OsStr::new(&v)));
     }
+    // Vite 8.2+ emits a `configLoader: 'native'` compatibility advisory when it
+    // bundle-loads an ESM `vite.config.*` that isn't flagged as ESM. vp resolves
+    // these subcommands to bare `node <tool>` invocations that load the user's
+    // config directly (bypassing the JS entry that would otherwise suppress it),
+    // so the raw upstream warning would leak into `vp build`/`vp run <task>`
+    // output. Provide the suppression value by default while honoring an explicit
+    // user value. Cached subcommands must also list it in `untracked_env` for the
+    // value to survive env-fingerprint filtering and reach the child process.
+    envs.entry(Arc::from(OsStr::new("VITE_CONFIG_NATIVE_IGNORE_WARNING")))
+        .or_insert_with(|| Arc::from(OsStr::new("true")));
     Arc::new(envs)
 }
 

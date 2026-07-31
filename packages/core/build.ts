@@ -500,43 +500,66 @@ async function bundleTsdown() {
 }
 
 // Ensure a bundled chunk imports the given ansis color helpers (e.g. `bold`,
-// `red`) from the shared `main-*.js` chunk. tsdown's logger module does not
-// import every color the Vite+ branding uses, so after the logger patches we
-// add any missing ones, resolving their (minified) export aliases from main's
-// own `export { ... }` map so the fix survives rolldown renaming them.
+// `red`). tsdown's logger module does not import every color the Vite+ branding
+// uses, so after the logger patches we add any missing ones, resolving their
+// (minified) export aliases from whichever shared chunk actually re-exports them.
+// Which chunk that is depends on rolldown's chunking: older builds inlined the
+// ansis colors into the `main-*.js` chunk, while newer builds split them into a
+// dedicated `ansis-*.js` chunk. Rather than pin to one chunk name, scan every
+// relative chunk the logger already imports and add each missing color to the
+// import from the chunk that exports it.
 async function ensureAnsisImports(
   content: string,
   names: string[],
   distDir: string,
 ): Promise<string> {
-  const importMatch = content.match(/import \{([^}]*)\} from "(\.\/main-[^"]+\.js)";/);
-  if (!importMatch) {
-    throw new Error('ensureAnsisImports: no `main-*.js` import found in branded logger chunk');
+  const imports = [...content.matchAll(/import \{([^}]*)\} from "(\.\/[^"]+\.js)";/g)];
+  if (imports.length === 0) {
+    throw new Error('ensureAnsisImports: no relative chunk import found in branded logger chunk');
   }
-  const [fullImport, bindings, mainSpecifier] = importMatch;
-  const localNames = new Set(
-    bindings.split(',').map((binding) => {
+  const localNames = new Set<string>();
+  for (const [, bindings] of imports) {
+    for (const binding of bindings.split(',')) {
       const trimmed = binding.trim();
+      if (!trimmed) {
+        continue;
+      }
       const aliased = trimmed.match(/\bas\s+([A-Za-z0-9_$]+)$/);
-      return aliased ? aliased[1] : trimmed;
-    }),
-  );
-  const missing = names.filter((name) => !localNames.has(name));
-  if (missing.length === 0) {
+      localNames.add(aliased ? aliased[1] : trimmed);
+    }
+  }
+  const remaining = new Set(names.filter((name) => !localNames.has(name)));
+  if (remaining.size === 0) {
     return content;
   }
-  const mainContent = await readFile(join(distDir, mainSpecifier.slice(2)), 'utf-8');
-  const additions = missing.map((name) => {
-    // main re-exports colors as `<local> as <alias>` (e.g. `bold as l`); the
-    // consumer side imports `<alias> as <local>`, so capture the alias here.
-    const exportAlias = mainContent.match(new RegExp(`\\b${name} as ([A-Za-z0-9_$]+)`));
-    if (!exportAlias) {
-      throw new Error(`ensureAnsisImports: \`${name}\` is not exported from ${mainSpecifier}`);
+  let result = content;
+  for (const [fullImport, bindings, specifier] of imports) {
+    if (remaining.size === 0) {
+      break;
     }
-    return `${exportAlias[1]} as ${name}`;
-  });
-  const newImport = `import { ${bindings.trim().replace(/,$/, '')}, ${additions.join(', ')} } from "${mainSpecifier}";`;
-  return content.replace(fullImport, newImport);
+    const chunkContent = await readFile(join(distDir, specifier.slice(2)), 'utf-8');
+    const additions: string[] = [];
+    for (const name of remaining) {
+      // The chunk re-exports colors as `<local> as <alias>` (e.g. `bold as l`);
+      // the consumer side imports `<alias> as <local>`, so capture the alias here.
+      const exportAlias = chunkContent.match(new RegExp(`\\b${name} as ([A-Za-z0-9_$]+)`));
+      if (exportAlias) {
+        additions.push(`${exportAlias[1]} as ${name}`);
+        remaining.delete(name);
+      }
+    }
+    if (additions.length === 0) {
+      continue;
+    }
+    const newImport = `import { ${bindings.trim().replace(/,$/, '')}, ${additions.join(', ')} } from "${specifier}";`;
+    result = result.replace(fullImport, newImport);
+  }
+  if (remaining.size > 0) {
+    throw new Error(
+      `ensureAnsisImports: \`${[...remaining].join(', ')}\` not exported from any chunk imported by the branded logger`,
+    );
+  }
+  return result;
 }
 
 async function brandTsdown() {

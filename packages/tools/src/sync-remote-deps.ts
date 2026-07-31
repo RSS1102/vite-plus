@@ -8,6 +8,7 @@ import upstreamVersions from '../.upstream-versions.json' with { type: 'json' };
 interface PnpmWorkspace {
   packages?: string[];
   catalog?: Record<string, string>;
+  catalogs?: Record<string, Record<string, string>>;
   catalogMode?: string;
   minimumReleaseAge?: number;
   minimumReleaseAgeExclude?: string[];
@@ -618,6 +619,43 @@ export function mergePnpmWorkspaces(
       },
       {} as Record<string, string>,
     );
+
+  // Merge named catalogs (e.g. rolldown's `rollup-tests` catalog consumed by its
+  // vendored `rollup-tests` package via `catalog:rollup-tests`). pnpm fails install
+  // with ERR_PNPM_CATALOG_ENTRY_NOT_FOUND_FOR_SPEC when a workspace package
+  // references a named catalog the merged workspace does not define, so propagate
+  // every named catalog from vp's own workspace and the upstream rolldown/vite
+  // workspaces, merging semver ranges on conflict just like the default catalog.
+  const namedCatalogs: Record<string, Record<string, string>> = {};
+  for (const source of [main.catalogs, rolldown.catalogs, rolldownVite.catalogs]) {
+    for (const [catalogName, entries] of Object.entries(source || {})) {
+      const target = (namedCatalogs[catalogName] ??= {});
+      for (const [pkg, version] of Object.entries(entries || {})) {
+        target[pkg] = target[pkg]
+          ? mergeSemverVersions(target[pkg], version, pkg, semver)
+          : version;
+      }
+    }
+  }
+  if (Object.keys(namedCatalogs).length > 0) {
+    result.catalogs = Object.keys(namedCatalogs)
+      .toSorted()
+      .reduce(
+        (sortedCatalogs, name) => {
+          sortedCatalogs[name] = Object.keys(namedCatalogs[name])
+            .toSorted()
+            .reduce(
+              (sortedEntries, key) => {
+                sortedEntries[key] = namedCatalogs[name][key];
+                return sortedEntries;
+              },
+              {} as Record<string, string>,
+            );
+          return sortedCatalogs;
+        },
+        {} as Record<string, Record<string, string>>,
+      );
+  }
 
   // Merge minimumReleaseAgeExclude
   result.minimumReleaseAgeExclude = mergeMinimumReleaseAgeExclude([

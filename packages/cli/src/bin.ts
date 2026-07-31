@@ -23,6 +23,14 @@ import { resolveUniversalViteConfig } from './resolve-vite-config.ts';
 import { vite } from './resolve-vite.ts';
 import { accent, errorMsg, log } from './utils/terminal.ts';
 
+// Vite 8.2+ emits a `configLoader: 'native'` compatibility advisory whenever it
+// bundle-loads an ESM `vite.config.*` that isn't flagged as ESM (no `.mjs`
+// extension or `"type": "module"`). vp loads the user's config internally for
+// nearly every command (build, check, lint, run task extraction, ...), so the
+// raw upstream warning would pollute vp's output on projects vp otherwise runs
+// fine. Suppress it by default while still honoring an explicit user override.
+process.env.VITE_CONFIG_NATIVE_IGNORE_WARNING ??= 'true';
+
 // Node.js sets O_NONBLOCK when pipe-backed stdio is first accessed. Materialize
 // the output streams before restoring the blocking semantics expected by Rust.
 void process.stdout;
