@@ -10,6 +10,7 @@ use std::os::fd::{BorrowedFd, RawFd};
 use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
+    path::Path,
     process::{ExitStatus, Stdio},
 };
 
@@ -26,8 +27,37 @@ fn normalize_path_env(
     cwd: &AbsolutePath,
 ) -> Result<OsString, std::env::JoinPathsError> {
     std::env::join_paths(std::env::split_paths(path_env).map(|path| {
-        if path.is_absolute() || path.starts_with("~") { path } else { cwd.as_path().join(path) }
+        if path.starts_with("~") || !is_plain_relative_path(&path) {
+            path
+        } else {
+            cwd.as_path().join(path)
+        }
     }))
+}
+
+/// Return whether a PATH entry is an ordinary relative path that should be resolved against the
+/// command cwd. This includes `tools`, `./tools`, and `../tools`.
+///
+/// Windows drive-relative (`C:tools`) and root-relative (`\tools`) paths have distinct native
+/// semantics. They are intentionally left unchanged, as are absolute drive and UNC paths.
+fn is_plain_relative_path(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        !path.has_root()
+            && path.components().next().is_some_and(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir
+                        | std::path::Component::ParentDir
+                        | std::path::Component::Normal(_)
+                )
+            })
+    }
+
+    #[cfg(not(windows))]
+    {
+        !path.is_absolute()
+    }
 }
 
 /// Result of running a command with fspy tracking.
@@ -63,7 +93,7 @@ pub fn resolve_bin(
         .map_err(|_| Error::CannotFindBinaryPath(bin_name.into()))?;
     let path = which::which_in(bin_name, Some(&path_env), cwd)
         .map_err(|_| Error::CannotFindBinaryPath(bin_name.into()))?;
-    let path = if path.is_absolute() { path } else { cwd.as_path().join(path) };
+    let path = if is_plain_relative_path(&path) { cwd.as_path().join(path) } else { path };
     AbsolutePathBuf::new(path).ok_or_else(|| Error::CannotFindBinaryPath(bin_name.into()))
 }
 
@@ -503,6 +533,92 @@ mod tests {
             std::env::split_paths(&normalized).collect::<Vec<_>>(),
             [PathBuf::from("~/bin")]
         );
+    }
+
+    #[test]
+    fn test_normalize_path_env_resolves_plain_relative_entry_against_cwd() {
+        use std::path::PathBuf;
+
+        let temp_dir = create_temp_dir();
+        let cwd_path = temp_dir.path().canonicalize().unwrap();
+        let cwd = AbsolutePathBuf::new(cwd_path.clone()).unwrap();
+        let path_env = std::env::join_paths([PathBuf::from("node_modules/.bin")]).unwrap();
+
+        let normalized = normalize_path_env(&path_env, &cwd).unwrap();
+
+        assert_eq!(
+            std::env::split_paths(&normalized).collect::<Vec<_>>(),
+            [cwd_path.join("node_modules/.bin")]
+        );
+    }
+
+    #[test]
+    fn test_normalize_path_env_resolves_common_relative_entries_and_keeps_absolute_entries() {
+        use std::path::PathBuf;
+
+        let temp_dir = create_temp_dir();
+        let cwd_path = temp_dir.path().canonicalize().unwrap();
+        let cwd = AbsolutePathBuf::new(cwd_path.clone()).unwrap();
+        let absolute_entry = cwd_path.join("absolute-bin");
+        let path_env = std::env::join_paths([
+            PathBuf::from("node_modules/.bin"),
+            PathBuf::from("./tools"),
+            PathBuf::from("../shared-bin"),
+            absolute_entry.clone(),
+        ])
+        .unwrap();
+
+        let normalized = normalize_path_env(&path_env, &cwd).unwrap();
+
+        assert_eq!(
+            std::env::split_paths(&normalized).collect::<Vec<_>>(),
+            [
+                cwd_path.join("node_modules/.bin"),
+                cwd_path.join("./tools"),
+                cwd_path.join("../shared-bin"),
+                absolute_entry,
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_normalize_path_env_preserves_windows_absolute_entries() {
+        use std::path::PathBuf;
+
+        let temp_dir = create_temp_dir();
+        let cwd_path = temp_dir.path().canonicalize().unwrap();
+        let cwd = AbsolutePathBuf::new(cwd_path).unwrap();
+
+        for entry in [r"C:\tools\bin", r"\\server\share\bin"] {
+            let path_env = std::env::join_paths([PathBuf::from(entry)]).unwrap();
+            let normalized = normalize_path_env(&path_env, &cwd).unwrap();
+
+            assert_eq!(
+                std::env::split_paths(&normalized).collect::<Vec<_>>(),
+                [PathBuf::from(entry)]
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_normalize_path_env_does_not_rewrite_windows_special_relative_entries() {
+        use std::path::PathBuf;
+
+        let temp_dir = create_temp_dir();
+        let cwd_path = temp_dir.path().canonicalize().unwrap();
+        let cwd = AbsolutePathBuf::new(cwd_path).unwrap();
+
+        for entry in [r"C:tools\bin", r"\tools\bin"] {
+            let path_env = std::env::join_paths([PathBuf::from(entry)]).unwrap();
+            let normalized = normalize_path_env(&path_env, &cwd).unwrap();
+
+            assert_eq!(
+                std::env::split_paths(&normalized).collect::<Vec<_>>(),
+                [PathBuf::from(entry)]
+            );
+        }
     }
 
     mod run_command_tests {

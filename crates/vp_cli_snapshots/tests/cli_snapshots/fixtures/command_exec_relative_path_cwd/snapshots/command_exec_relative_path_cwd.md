@@ -12,3 +12,19 @@ relative PATH entry resolves from the selected package
 ```
 resolved from package cwd
 ```
+
+## `PATH=tools:${PATH} vp exec --filter app -- fake-node`
+
+plain relative PATH entry resolves from the selected package
+
+```
+resolved from package cwd
+```
+
+## `PATH=../shared-tools:${PATH} vp exec --filter app -- fake-node`
+
+parent relative PATH entry resolves from the selected package
+
+```
+resolved from parent relative PATH
+```

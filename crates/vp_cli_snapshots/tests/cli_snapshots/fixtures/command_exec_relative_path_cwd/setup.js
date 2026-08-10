@@ -1,9 +1,14 @@
 const fs = require('fs');
 
-fs.mkdirSync('packages/app/tools', { recursive: true });
-fs.writeFileSync(
-  'packages/app/tools/fake-node',
-  '#!/usr/bin/env node\nconsole.log("resolved from package cwd");\n',
-  { mode: 0o755 },
-);
-fs.writeFileSync('packages/app/tools/fake-node.cmd', '@node "%~dp0\\fake-node" %*\n');
+function writeFakeNode(directory, message) {
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(
+    `${directory}/fake-node`,
+    `#!/usr/bin/env node\nconsole.log(${JSON.stringify(message)});\n`,
+    { mode: 0o755 },
+  );
+  fs.writeFileSync(`${directory}/fake-node.cmd`, '@node "%~dp0\\fake-node" %*\n');
+}
+
+writeFakeNode('packages/app/tools', 'resolved from package cwd');
+writeFakeNode('packages/shared-tools', 'resolved from parent relative PATH');
