@@ -1,6 +1,6 @@
 {
   "name": "@voidzero-dev/vite-plus-core",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "The Unified Toolchain for the Web",
   "homepage": "https://viteplus.dev/guide",
   "bugs": {
@@ -134,14 +134,14 @@
     "magic-string": "^0.30.21",
     "oxc-parser": "catalog:",
     "oxfmt": "catalog:",
-    "picocolors": "^1.1.1",
-    "picomatch": "^4.0.3",
+    "picocolors": "catalog:",
+    "picomatch": "catalog:",
     "pkg-types": "^2.3.0",
     "rolldown": "workspace:*",
     "rolldown-plugin-dts": "catalog:",
-    "rollup": "^4.18.0",
+    "rollup": "catalog:",
     "rollup-plugin-license": "^3.6.0",
-    "semver": "^7.7.3",
+    "semver": "catalog:",
     "tinyglobby": "^0.2.15",
     "tree-kill": "^1.2.2",
     "tsdown": "catalog:",
@@ -227,7 +227,7 @@
   },
   "bundledVersions": {
     "vite": "8.2.1",
-    "rolldown": "1.2.3",
+    "rolldown": "1.2.4",
     "tsdown": "0.22.14"
   }
 }
