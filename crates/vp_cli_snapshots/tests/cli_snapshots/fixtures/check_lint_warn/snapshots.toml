@@ -1,6 +1,8 @@
 [[case]]
 name = "check_lint_warn"
 vp = "local"
+env = { VP_NODE_VERSION = "22.18.0" }
 steps = [
   { argv = ["vp", "check"], continue-on-failure = true },
+  { argv = ["vp", "check", "--quiet"], comment = "warning diagnostics are suppressed", continue-on-failure = true },
 ]

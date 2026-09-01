@@ -18,3 +18,24 @@ error: Lint issues found
 
 Found 1 error and 0 warnings in 2 files (<duration>, <n> threads)
 ```
+
+## `vp check --quiet`
+
+errors are still reported
+
+**Exit code:** 1
+
+```
+pass: All 3 files are correctly formatted (<duration>, <n> threads)
+error: Lint issues found
+× eslint(no-eval): eval can be harmful.
+   ╭─[src/index.js:2:3]
+ 1 │ function hello() {
+ 2 │   eval("code");
+   ·   ────
+ 3 │   return "hello";
+   ╰────
+  help: Avoid eval(). For JSON parsing use JSON.parse(); for dynamic property access use bracket notation (obj[key]); for other cases refactor to avoid evaluating strings as code.
+
+Found 1 error in 2 files (<duration>, <n> threads)
+```
