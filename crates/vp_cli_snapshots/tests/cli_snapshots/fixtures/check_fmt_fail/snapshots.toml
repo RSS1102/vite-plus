@@ -1,7 +1,6 @@
 [[case]]
 name = "check_fmt_fail"
 vp = "local"
-env = { VP_NODE_VERSION = "22.18.0" }
 steps = [
   { argv = ["vp", "check"], continue-on-failure = true },
   { argv = ["vp", "check", "--quiet"], comment = "quiet does not suppress formatting failures", continue-on-failure = true },

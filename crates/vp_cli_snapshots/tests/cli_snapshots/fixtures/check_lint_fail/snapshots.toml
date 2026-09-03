@@ -1,7 +1,6 @@
 [[case]]
 name = "check_lint_fail"
 vp = "local"
-env = { VP_NODE_VERSION = "22.18.0" }
 steps = [
   { argv = ["vp", "check"], continue-on-failure = true },
   { argv = ["vp", "check", "--quiet"], comment = "warnings are suppressed while errors are still reported", continue-on-failure = true },

@@ -1,7 +1,6 @@
 [[case]]
 name = "check_fix_lint_warn"
 vp = "local"
-env = { VP_NODE_VERSION = "22.18.0" }
 steps = [
   { argv = ["vp", "check", "--fix"], continue-on-failure = true },
   { argv = ["vp", "check"], continue-on-failure = true },
