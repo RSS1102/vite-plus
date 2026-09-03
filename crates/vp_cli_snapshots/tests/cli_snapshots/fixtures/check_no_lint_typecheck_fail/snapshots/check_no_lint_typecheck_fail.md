@@ -33,5 +33,5 @@ error: Type errors found
  2 │ export { value };
    ╰────
 
-Found 1 error in 2 files (<duration>, <n> threads)
+Found 1 error and 0 warnings in 2 files (<duration>, <n> threads)
 ```

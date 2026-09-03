@@ -201,47 +201,27 @@ pub(crate) async fn execute_check(
                 }
             }
             Some(Err(failure)) => {
-                if quiet && failure.errors == 0 && status == ExitStatus::SUCCESS {
-                    let message = format!(
-                        "{} in {}",
-                        lint_message_kind.success_label(true),
-                        format_count(failure.summary.files, "file", "files"),
-                    );
-                    let detail = format!(
-                        "({}, {} threads)",
-                        failure.summary.duration, failure.summary.threads
-                    );
-                    if fix && !no_fmt {
-                        deferred_lint_pass = Some((message, detail));
-                    } else {
-                        print_pass_line(&message, Some(&detail));
-                    }
-                } else {
+                // `--quiet` suppresses warning diagnostics, but oxlint still
+                // reports warning counts in its summary. Preserve those counts
+                // so `vp check --quiet` matches `vp lint --quiet` semantics.
+                let quiet_warning_only =
+                    quiet && failure.errors == 0 && status == ExitStatus::SUCCESS;
+                if !quiet_warning_only {
                     if failure.errors == 0 && failure.warnings > 0 {
                         output::warn(lint_message_kind.warning_heading());
                     } else {
                         output::error(lint_message_kind.issue_heading());
                     }
-                    print_stdout_block(&failure.diagnostics);
-                    if quiet && failure.errors > 0 {
-                        print_summary_line(&format!(
-                            "Found {} in {} ({}, {} threads)",
-                            format_count(failure.errors, "error", "errors"),
-                            format_count(failure.summary.files, "file", "files"),
-                            failure.summary.duration,
-                            failure.summary.threads
-                        ));
-                    } else {
-                        print_summary_line(&format!(
-                            "Found {} and {} in {} ({}, {} threads)",
-                            format_count(failure.errors, "error", "errors"),
-                            format_count(failure.warnings, "warning", "warnings"),
-                            format_count(failure.summary.files, "file", "files"),
-                            failure.summary.duration,
-                            failure.summary.threads
-                        ));
-                    }
                 }
+                print_stdout_block(&failure.diagnostics);
+                print_summary_line(&format!(
+                    "Found {} and {} in {} ({}, {} threads)",
+                    format_count(failure.errors, "error", "errors"),
+                    format_count(failure.warnings, "warning", "warnings"),
+                    format_count(failure.summary.files, "file", "files"),
+                    failure.summary.duration,
+                    failure.summary.threads
+                ));
             }
             None => {
                 // oxlint handles --no-error-on-unmatched-pattern natively and

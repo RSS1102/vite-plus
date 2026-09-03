@@ -23,7 +23,8 @@ warning diagnostics are suppressed
 
 ```
 pass: All 3 files are correctly formatted (<duration>, <n> threads)
-pass: Found no lint errors in 2 files (<duration>, <n> threads)
+
+Found 0 errors and 1 warning in 2 files (<duration>, <n> threads)
 ```
 
 ## `vp lint --quiet`

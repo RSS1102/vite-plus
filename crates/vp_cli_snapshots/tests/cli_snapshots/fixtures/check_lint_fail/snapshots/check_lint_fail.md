@@ -46,5 +46,5 @@ error: Lint issues found
    ╰────
   help: Avoid eval(). For JSON parsing use JSON.parse(); for dynamic property access use bracket notation (obj[key]); for other cases refactor to avoid evaluating strings as code.
 
-Found 1 error in 2 files (<duration>, <n> threads)
+Found 1 error and 1 warning in 2 files (<duration>, <n> threads)
 ```
