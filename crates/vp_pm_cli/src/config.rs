@@ -241,9 +241,11 @@ mod tests {
         let project = project_with_npmrc(
             "registry=https://default.example/\n@yarnpkg:registry=https://yarn.example/\n",
         );
-        let config = NpmConfig::load_for_project(Some(project.path().to_path_buf()));
-        assert_eq!(config.registry_for_package(""), "https://default.example");
-        assert_eq!(config.registry_for_package("@yarnpkg/cli-dist"), "https://yarn.example");
+        EnvConfig::with_vars(std::iter::empty::<(&'static str, &'static str)>(), |_| {
+            let config = NpmConfig::load_for_project(Some(project.path().to_path_buf()));
+            assert_eq!(config.registry_for_package(""), "https://default.example");
+            assert_eq!(config.registry_for_package("@yarnpkg/cli-dist"), "https://yarn.example");
+        });
     }
 
     #[test]
