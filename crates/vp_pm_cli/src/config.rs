@@ -1,8 +1,9 @@
-use std::{collections::HashMap, env, fs, path::PathBuf};
+use std::{collections::HashMap, env, ffi::OsString, fs, path::PathBuf};
 
 use cow_utils::CowUtils;
 use reqwest::{RequestBuilder, Url};
 use vp_shared::EnvConfig;
+use vt_path::AbsolutePath;
 use vt_workspace::find_workspace_root;
 
 const DEFAULT_NPM_REGISTRY: &str = "https://registry.npmjs.org";
@@ -16,11 +17,20 @@ pub(crate) struct NpmConfig {
 
 impl NpmConfig {
     pub(crate) fn load() -> Self {
-        let project_root = vt_path::current_dir()
+        vt_path::current_dir()
             .ok()
-            .and_then(|cwd| find_workspace_root(&cwd).ok())
-            .map(|(root, _)| root.path.as_path().to_path_buf());
-        Self::load_for_project(project_root)
+            .map_or_else(|| Self::load_for_project(None), |cwd| Self::load_for_cwd(&cwd))
+    }
+
+    pub(crate) fn load_for_cwd(cwd: &AbsolutePath) -> Self {
+        find_workspace_root(cwd).map_or_else(
+            |_| Self::load_for_project(None),
+            |(root, _)| Self::load_for_project_root(&root.path),
+        )
+    }
+
+    pub(crate) fn load_for_project_root(project_root: &AbsolutePath) -> Self {
+        Self::load_for_project(Some(project_root.as_path().to_path_buf()))
     }
 
     fn load_for_project(project_root: Option<PathBuf>) -> Self {
@@ -40,12 +50,8 @@ impl NpmConfig {
         }
 
         // npm_config_* is the highest-precedence npm config source available to vp.
-        for (key, value) in env::vars() {
-            let Some(raw_key) =
-                key.strip_prefix("npm_config_").or_else(|| key.strip_prefix("NPM_CONFIG_"))
-            else {
-                continue;
-            };
+        for (key, value) in npm_config_env() {
+            let raw_key = &key["npm_config_".len()..];
             if value.is_empty() {
                 continue;
             }
@@ -60,15 +66,34 @@ impl NpmConfig {
         Self { values }
     }
 
-    fn registry_for_package(&self, package: &str) -> String {
+    pub(crate) fn registry_for_package(&self, package: &str) -> String {
         let scoped = package
             .strip_prefix('@')
             .and_then(|rest| rest.split_once('/'))
-            .and_then(|(scope, _)| self.values.get(vt_str::format!("@{scope}:registry").as_str()));
-        scoped.or_else(|| self.values.get("registry")).map_or_else(
-            || DEFAULT_NPM_REGISTRY.to_string(),
-            |value| value.trim_end_matches('/').to_string(),
-        )
+            .and_then(|(scope, _)| self.values.get(vt_str::format!("@{scope}:registry").as_str()))
+            .filter(|value| !value.is_empty());
+        scoped
+            .or_else(|| self.values.get("registry").filter(|value| !value.is_empty()))
+            .map_or_else(
+                || DEFAULT_NPM_REGISTRY.to_string(),
+                |value| value.trim_end_matches('/').to_string(),
+            )
+    }
+
+    pub(crate) fn package_tgz_url(&self, name: &str, version: &str) -> vt_str::Str {
+        let registry = self.registry_for_package(name);
+        let filename = name.split('/').next_back().unwrap_or(name);
+        vt_str::format!("{registry}/{name}/-/{filename}-{version}.tgz")
+    }
+
+    pub(crate) fn package_version_url(&self, name: &str, version_or_tag: &str) -> vt_str::Str {
+        let registry = self.registry_for_package(name);
+        vt_str::format!("{registry}/{name}/{version_or_tag}")
+    }
+
+    pub(crate) fn package_metadata_url(&self, name: &str) -> vt_str::Str {
+        let registry = self.registry_for_package(name);
+        vt_str::format!("{registry}/{name}")
     }
 
     pub(crate) fn apply_auth(&self, request: RequestBuilder, url: &str) -> RequestBuilder {
@@ -95,10 +120,13 @@ impl NpmConfig {
             for prefix in [prefix.as_str(), prefix.trim_end_matches('/')] {
                 if let Some(token) =
                     self.values.get(vt_str::format!("{prefix}:_authtoken").as_str())
+                    && !token.is_empty()
                 {
                     return request.bearer_auth(token);
                 }
-                if let Some(auth) = self.values.get(vt_str::format!("{prefix}:_auth").as_str()) {
+                if let Some(auth) = self.values.get(vt_str::format!("{prefix}:_auth").as_str())
+                    && !auth.is_empty()
+                {
                     return request.header(
                         reqwest::header::AUTHORIZATION,
                         vt_str::format!("Basic {auth}").as_str(),
@@ -107,6 +135,8 @@ impl NpmConfig {
                 let username = self.values.get(vt_str::format!("{prefix}:username").as_str());
                 let password = self.values.get(vt_str::format!("{prefix}:_password").as_str());
                 if let (Some(username), Some(password)) = (username, password)
+                    && !username.is_empty()
+                    && !password.is_empty()
                     && let Ok(decoded) = base64_simd::STANDARD.decode_to_vec(password)
                 {
                     return request
@@ -119,11 +149,25 @@ impl NpmConfig {
 }
 
 fn env_value(name: &str) -> Option<String> {
-    env::vars().find_map(|(key, value)| {
-        key.strip_prefix("npm_config_")
-            .or_else(|| key.strip_prefix("NPM_CONFIG_"))
-            .filter(|key| key.eq_ignore_ascii_case(name))
-            .map(|_| value)
+    npm_config_env().find_map(|(key, value)| {
+        key["npm_config_".len()..]
+            .eq_ignore_ascii_case(name)
+            .then_some(value)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn npm_config_env() -> impl Iterator<Item = (String, String)> {
+    npm_config_env_from(env::vars_os())
+}
+
+fn npm_config_env_from(
+    vars: impl Iterator<Item = (OsString, OsString)>,
+) -> impl Iterator<Item = (String, String)> {
+    vars.filter_map(|(key, value)| {
+        let key = key.into_string().ok()?;
+        let value = value.into_string().ok()?;
+        key.get(.."npm_config_".len())?.eq_ignore_ascii_case("npm_config_").then_some((key, value))
     })
 }
 
@@ -183,38 +227,51 @@ fn load_npmrc(path: PathBuf, values: &mut HashMap<String, String>) {
         let Some((key, value)) = line.split_once('=') else { continue };
         let key = normalize_key(key);
         if !key.is_empty() {
-            values.insert(key, expand_value(value));
+            values.insert(key, expand_value(&parse_npmrc_value(value)));
         }
     }
+}
+
+fn parse_npmrc_value(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        return serde_json::from_str(value)
+            .unwrap_or_else(|_| value[1..value.len() - 1].to_string());
+    }
+    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
+        return value[1..value.len() - 1].to_string();
+    }
+
+    let mut parsed = String::with_capacity(value.len());
+    let mut escaped = false;
+    for character in value.chars() {
+        if escaped {
+            if !matches!(character, '\\' | '#' | ';') {
+                parsed.push('\\');
+            }
+            parsed.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if matches!(character, '#' | ';') {
+            break;
+        }
+        parsed.push(character);
+    }
+    if escaped {
+        parsed.push('\\');
+    }
+    parsed.trim_end().to_string()
 }
 
 /// Get the configured default NPM registry URL.
 #[must_use]
 pub fn npm_registry() -> String {
     NpmConfig::load().registry_for_package("")
-}
-
-fn npm_registry_for_package(name: &str) -> String {
-    NpmConfig::load().registry_for_package(name)
-}
-
-#[must_use]
-pub(crate) fn get_npm_package_tgz_url(name: &str, version: &str) -> vt_str::Str {
-    let registry = npm_registry_for_package(name);
-    let filename = name.split('/').next_back().unwrap_or(name);
-    vt_str::format!("{registry}/{name}/-/{filename}-{version}.tgz")
-}
-
-#[must_use]
-pub(crate) fn get_npm_package_version_url(name: &str, version_or_tag: &str) -> vt_str::Str {
-    let registry = npm_registry_for_package(name);
-    vt_str::format!("{registry}/{name}/{version_or_tag}")
-}
-
-#[must_use]
-pub(crate) fn get_npm_package_metadata_url(name: &str) -> vt_str::Str {
-    let registry = npm_registry_for_package(name);
-    vt_str::format!("{registry}/{name}")
 }
 
 #[cfg(test)]
@@ -249,6 +306,68 @@ mod tests {
     }
 
     #[test]
+    fn loads_registry_from_caller_provided_workspace() {
+        let project = project_with_npmrc("registry=https://target.example\n");
+        let cwd = AbsolutePath::new(project.path()).unwrap();
+        EnvConfig::with_vars(std::iter::empty::<(&str, &str)>(), |_| {
+            let config = NpmConfig::load_for_cwd(cwd);
+            assert_eq!(config.registry_for_package("pnpm"), "https://target.example");
+        });
+    }
+
+    #[test]
+    fn empty_registry_values_fall_back() {
+        let config = NpmConfig {
+            values: HashMap::from([
+                ("@yarnpkg:registry".to_string(), String::new()),
+                ("registry".to_string(), "https://default.example/".to_string()),
+            ]),
+        };
+        assert_eq!(config.registry_for_package("@yarnpkg/cli-dist"), "https://default.example");
+
+        let config = NpmConfig { values: HashMap::from([("registry".to_string(), String::new())]) };
+        assert_eq!(config.registry_for_package("pnpm"), DEFAULT_NPM_REGISTRY);
+    }
+
+    #[test]
+    fn empty_userconfig_environment_value_is_ignored() {
+        EnvConfig::with_vars([("NPM_CONFIG_USERCONFIG", "")], |_| {
+            assert_eq!(env_value("userconfig"), None);
+        });
+    }
+
+    #[test]
+    fn npm_config_environment_prefix_is_case_insensitive() {
+        let values = npm_config_env_from(
+            [(OsString::from("Npm_Config_Registry"), OsString::from("https://example.test"))]
+                .into_iter(),
+        )
+        .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            vec![("Npm_Config_Registry".to_string(), "https://example.test".to_string())]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_environment_entries_are_skipped() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let values = npm_config_env_from(
+            [
+                (OsString::from_vec(vec![0xff]), OsString::from("ignored")),
+                (OsString::from("NPM_CONFIG_REGISTRY"), OsString::from_vec(vec![0xff])),
+                (OsString::from("NPM_CONFIG_REGISTRY"), OsString::from("https://example.test")),
+            ]
+            .into_iter(),
+        )
+        .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].1, "https://example.test");
+    }
+
+    #[test]
     fn environment_registry_overrides_project() {
         let project = project_with_npmrc("registry=https://project.example\n");
         EnvConfig::with_vars([(env_vars::NPM_CONFIG_REGISTRY, "https://env.example")], |_| {
@@ -272,6 +391,41 @@ mod tests {
                 .unwrap();
             assert_eq!(request.headers()[reqwest::header::AUTHORIZATION], "Bearer TEAM");
         });
+    }
+
+    #[test]
+    fn empty_credentials_fall_back_to_parent_auth_path() {
+        let config = NpmConfig {
+            values: HashMap::from([
+                ("//registry.example/team/:_authtoken".to_string(), String::new()),
+                ("//registry.example/:_authtoken".to_string(), "HOST".to_string()),
+            ]),
+        };
+        let request = config
+            .apply_auth(
+                http_client().get("https://registry.example/team/pkg"),
+                "https://registry.example/team/pkg",
+            )
+            .build()
+            .unwrap();
+        assert_eq!(request.headers()[reqwest::header::AUTHORIZATION], "Bearer HOST");
+    }
+
+    #[test]
+    fn parses_inline_comments_and_escapes_in_npmrc_values() {
+        let project = project_with_npmrc(
+            "registry=https://registry.example/ ; mirror\n\
+             //registry.example/:_authToken=SECRET # CI\n\
+             quoted=\"value # retained\"\n\
+             fragment=https://example.test/\\#retained\n\
+             semicolon=left\\;right ; removed\n",
+        );
+        let config = NpmConfig::load_for_project(Some(project.path().to_path_buf()));
+        assert_eq!(config.registry_for_package("pnpm"), "https://registry.example");
+        assert_eq!(config.values["//registry.example/:_authtoken"], "SECRET");
+        assert_eq!(config.values["quoted"], "value # retained");
+        assert_eq!(config.values["fragment"], "https://example.test/#retained");
+        assert_eq!(config.values["semicolon"], "left;right");
     }
 
     #[test]

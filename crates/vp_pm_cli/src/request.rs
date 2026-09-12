@@ -49,6 +49,10 @@ impl HttpClient {
         Self { max_times, min_delay, npm_config: NpmConfig::load() }
     }
 
+    pub(crate) fn with_npm_config(max_times: usize, min_delay: u64, npm_config: NpmConfig) -> Self {
+        Self { max_times, min_delay, npm_config }
+    }
+
     /// Get raw bytes from a URL
     ///
     /// # Arguments
@@ -374,12 +378,32 @@ fn extract_tgz_file(
 /// # Returns
 /// * `Ok(())` - If the tgz file is downloaded, verified (if hash provided) and extracted successfully.
 /// * `Err(e)` - If the tgz file is not downloaded, verified or extracted successfully.
+#[cfg(test)]
 pub(crate) async fn download_and_extract_tgz_with_hash(
     url: &str,
     target_dir: impl AsRef<Path>,
     archive_file: Option<&Path>,
     expected_hash: Option<&str>,
     message: Option<&str>,
+) -> Result<(), Error> {
+    download_and_extract_tgz_with_hash_and_config(
+        url,
+        target_dir,
+        archive_file,
+        expected_hash,
+        message,
+        &NpmConfig::load(),
+    )
+    .await
+}
+
+pub(crate) async fn download_and_extract_tgz_with_hash_and_config(
+    url: &str,
+    target_dir: impl AsRef<Path>,
+    archive_file: Option<&Path>,
+    expected_hash: Option<&str>,
+    message: Option<&str>,
+    npm_config: &NpmConfig,
 ) -> Result<(), Error> {
     if let Some(archive_file) = archive_file
         && (archive_file.as_os_str().is_empty()
@@ -403,7 +427,15 @@ pub(crate) async fn download_and_extract_tgz_with_hash(
     // and propagate unchanged so the caller in `package_manager.rs` can map a
     // 404 to `PackageManagerVersionNotFound`.
     (|| async {
-        download_and_extract_tgz_once(url, &target_dir, archive_file, expected_hash, message).await
+        download_and_extract_tgz_once(
+            url,
+            &target_dir,
+            archive_file,
+            expected_hash,
+            message,
+            npm_config,
+        )
+        .await
     })
     .retry(
         ExponentialBuilder::default()
@@ -425,6 +457,7 @@ async fn download_and_extract_tgz_once(
     archive_file: Option<&Path>,
     expected_hash: Option<&str>,
     message: Option<&str>,
+    npm_config: &NpmConfig,
 ) -> Result<(), Error> {
     // Reset target directory so a partial prior attempt can't interfere.
     if fs::try_exists(target_dir).await.unwrap_or(false) {
@@ -437,7 +470,7 @@ async fn download_and_extract_tgz_once(
     // letting `download_file` retry here too would nest two retry layers and
     // multiply attempts (up to N×M downloads) for a persistent failure.
     let tgz_file = target_dir.join("package.tgz");
-    let client = HttpClient::with_config(0, 0);
+    let client = HttpClient::with_npm_config(0, 0, npm_config.clone());
     client.download_file(url, &tgz_file, message).await?;
 
     if let Some(archive_file) = archive_file {
