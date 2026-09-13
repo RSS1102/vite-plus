@@ -22,7 +22,7 @@ use crate::config::NpmConfig;
 pub struct HttpClient {
     max_times: usize,
     min_delay: u64,
-    npm_config: NpmConfig,
+    npm_config: Option<NpmConfig>,
 }
 
 impl Default for HttpClient {
@@ -46,11 +46,18 @@ impl HttpClient {
     /// * `min_delay` - Minimum delay in milliseconds for exponential backoff
     #[must_use]
     pub(crate) fn with_config(max_times: usize, min_delay: u64) -> Self {
-        Self { max_times, min_delay, npm_config: NpmConfig::load() }
+        Self { max_times, min_delay, npm_config: None }
     }
 
     pub(crate) fn with_npm_config(max_times: usize, min_delay: u64, npm_config: NpmConfig) -> Self {
-        Self { max_times, min_delay, npm_config }
+        Self { max_times, min_delay, npm_config: Some(npm_config) }
+    }
+
+    fn apply_auth(&self, request: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+        match &self.npm_config {
+            Some(config) => config.apply_auth(request, url),
+            None => request,
+        }
     }
 
     /// Get raw bytes from a URL
@@ -71,12 +78,8 @@ impl HttpClient {
         // Read the body inside the retry so a mid-body connection drop gets
         // retried instead of failing outright, like `download_file`.
         let bytes = (|| async {
-            let response = self
-                .npm_config
-                .apply_auth(client.get(url), url)
-                .send()
-                .await?
-                .error_for_status()?;
+            let response =
+                self.apply_auth(client.get(url), url).send().await?.error_for_status()?;
             Ok::<_, Error>(response.bytes().await?)
         })
         .retry(
@@ -138,7 +141,7 @@ impl HttpClient {
             if let Some(accept) = accept {
                 request = request.header(reqwest::header::ACCEPT, accept);
             }
-            request = self.npm_config.apply_auth(request, url);
+            request = self.apply_auth(request, url);
             let response = request.send().await?.error_for_status()?;
             Ok::<T, Error>(response.json::<T>().await?)
         })
@@ -213,7 +216,6 @@ impl HttpClient {
         let timeout = vp_shared::download_timeout();
         let result = (|| async {
             let response = self
-                .npm_config
                 .apply_auth(client.get(url).timeout(timeout), url)
                 .send()
                 .await?
@@ -827,12 +829,12 @@ mod tests {
         let client = HttpClient {
             max_times: 0,
             min_delay: 0,
-            npm_config: NpmConfig {
+            npm_config: Some(NpmConfig {
                 values: std::collections::HashMap::from([(
                     vt_str::format!("{registry_key}/:_authtoken").to_string(),
                     "SECRET".to_string(),
                 )]),
-            },
+            }),
         };
 
         let authenticated = server.mock(|when, then| {
@@ -861,6 +863,20 @@ mod tests {
         authenticated.assert_hits(1);
         authenticated_download.assert_hits(1);
         assert_eq!(fs::read(target.path().join("package.tgz")).unwrap(), b"archive");
+    }
+
+    #[test]
+    fn default_http_client_does_not_apply_npm_auth() {
+        vp_shared::ensure_tls_provider();
+        let client = HttpClient::new();
+        let request = client
+            .apply_auth(
+                reqwest::Client::new().get("https://registry.example/package"),
+                "https://registry.example/package",
+            )
+            .build()
+            .unwrap();
+        assert!(!request.headers().contains_key(reqwest::header::AUTHORIZATION));
     }
 
     #[tokio::test]

@@ -15,6 +15,12 @@ pub(crate) struct NpmConfig {
     pub(crate) values: HashMap<String, String>,
 }
 
+enum NpmAuth<'a> {
+    Token(&'a str),
+    Encoded(&'a str),
+    UsernamePassword { username: &'a str, password: Vec<u8> },
+}
+
 impl NpmConfig {
     pub(crate) fn load() -> Self {
         vt_path::current_dir()
@@ -24,7 +30,7 @@ impl NpmConfig {
 
     pub(crate) fn load_for_cwd(cwd: &AbsolutePath) -> Self {
         find_workspace_root(cwd).map_or_else(
-            |_| Self::load_for_project(None),
+            |_| Self::load_for_project_root(cwd),
             |(root, _)| Self::load_for_project_root(&root.path),
         )
     }
@@ -97,8 +103,24 @@ impl NpmConfig {
     }
 
     pub(crate) fn apply_auth(&self, request: RequestBuilder, url: &str) -> RequestBuilder {
-        let Ok(url) = Url::parse(url) else { return request };
-        let Some(host) = url.host_str() else { return request };
+        match self.auth_for_url(url) {
+            Some(NpmAuth::Token(token)) => request.bearer_auth(token),
+            Some(NpmAuth::Encoded(auth)) => request
+                .header(reqwest::header::AUTHORIZATION, vt_str::format!("Basic {auth}").as_str()),
+            Some(NpmAuth::UsernamePassword { username, password }) => {
+                request.basic_auth(username, Some(String::from_utf8_lossy(&password).as_ref()))
+            }
+            None => request,
+        }
+    }
+
+    pub(crate) fn has_auth_for_url(&self, url: &str) -> bool {
+        self.auth_for_url(url).is_some()
+    }
+
+    fn auth_for_url(&self, url: &str) -> Option<NpmAuth<'_>> {
+        let Ok(url) = Url::parse(url) else { return None };
+        let host = url.host_str()?;
         let authority = url
             .port()
             .map_or_else(|| host.to_string(), |port| vt_str::format!("{host}:{port}").to_string());
@@ -122,15 +144,12 @@ impl NpmConfig {
                     self.values.get(vt_str::format!("{prefix}:_authtoken").as_str())
                     && !token.is_empty()
                 {
-                    return request.bearer_auth(token);
+                    return Some(NpmAuth::Token(token));
                 }
                 if let Some(auth) = self.values.get(vt_str::format!("{prefix}:_auth").as_str())
                     && !auth.is_empty()
                 {
-                    return request.header(
-                        reqwest::header::AUTHORIZATION,
-                        vt_str::format!("Basic {auth}").as_str(),
-                    );
+                    return Some(NpmAuth::Encoded(auth));
                 }
                 let username = self.values.get(vt_str::format!("{prefix}:username").as_str());
                 let password = self.values.get(vt_str::format!("{prefix}:_password").as_str());
@@ -139,12 +158,11 @@ impl NpmConfig {
                     && !password.is_empty()
                     && let Ok(decoded) = base64_simd::STANDARD.decode_to_vec(password)
                 {
-                    return request
-                        .basic_auth(username, Some(String::from_utf8_lossy(&decoded).as_ref()));
+                    return Some(NpmAuth::UsernamePassword { username, password: decoded });
                 }
             }
         }
-        request
+        None
     }
 }
 
@@ -309,6 +327,17 @@ mod tests {
     fn loads_registry_from_caller_provided_workspace() {
         let project = project_with_npmrc("registry=https://target.example\n");
         let cwd = AbsolutePath::new(project.path()).unwrap();
+        EnvConfig::with_vars(std::iter::empty::<(&str, &str)>(), |_| {
+            let config = NpmConfig::load_for_cwd(cwd);
+            assert_eq!(config.registry_for_package("pnpm"), "https://target.example");
+        });
+    }
+
+    #[test]
+    fn loads_registry_from_caller_directory_without_a_package() {
+        let directory = TempDir::new().unwrap();
+        fs::write(directory.path().join(".npmrc"), "registry=https://target.example\n").unwrap();
+        let cwd = AbsolutePath::new(directory.path()).unwrap();
         EnvConfig::with_vars(std::iter::empty::<(&str, &str)>(), |_| {
             let config = NpmConfig::load_for_cwd(cwd);
             assert_eq!(config.registry_for_package("pnpm"), "https://target.example");

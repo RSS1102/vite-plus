@@ -929,6 +929,13 @@ fn write_latest_version_cache(path: &AbsolutePath, version: &str) -> io::Result<
     fs::write(path, version)
 }
 
+async fn fetch_latest_version(url: &str, npm_config: &NpmConfig) -> Result<Str, Error> {
+    HttpClient::with_npm_config(3, 500, npm_config.clone())
+        .get_json::<PackageJson>(url)
+        .await
+        .map(|package_json| package_json.version)
+}
+
 async fn get_latest_version_with_config(
     package_manager_type: PackageManagerType,
     npm_config: &NpmConfig,
@@ -940,19 +947,24 @@ async fn get_latest_version_with_config(
         package_manager_type.to_string()
     };
     let registry = npm_config.registry_for_package(&package_name);
+    let url = npm_config.package_version_url(&package_name, "latest");
+
+    // A persisted response authenticated as one user must not be reused by
+    // another user of the same registry URL. Avoid storing credential-derived
+    // cache keys and query authenticated registries directly instead.
+    if npm_config.has_auth_for_url(&url) {
+        return fetch_latest_version(&url, npm_config).await;
+    }
+
     let cache_path = latest_version_cache_path(package_manager_type, &registry)?;
     let cached = read_latest_version_cache(&cache_path);
     if let Some((version, true)) = &cached {
         return Ok(version.clone());
     }
-    let url = npm_config.package_version_url(&package_name, "latest");
-    match HttpClient::with_npm_config(3, 500, npm_config.clone())
-        .get_json::<PackageJson>(&url)
-        .await
-    {
-        Ok(package_json) => {
-            let _ = write_latest_version_cache(&cache_path, &package_json.version);
-            Ok(package_json.version)
+    match fetch_latest_version(&url, npm_config).await {
+        Ok(version) => {
+            let _ = write_latest_version_cache(&cache_path, &version);
+            Ok(version)
         }
         Err(error) => {
             let Some((version, _)) = cached else { return Err(error) };
@@ -1168,6 +1180,24 @@ pub async fn download_package_manager(
         version_or_latest,
         expected_hash,
         &NpmConfig::load(),
+    )
+    .await
+}
+
+/// Download a package manager using npm configuration from the workspace that
+/// contains `cwd`, rather than from the process working directory.
+pub async fn download_package_manager_for_cwd(
+    cwd: impl AsRef<AbsolutePath>,
+    package_manager_type: PackageManagerType,
+    version_or_latest: &str,
+    expected_hash: Option<&str>,
+) -> Result<(AbsolutePathBuf, Str, Str), Error> {
+    let npm_config = NpmConfig::load_for_cwd(cwd.as_ref());
+    download_package_manager_with_config(
+        package_manager_type,
+        version_or_latest,
+        expected_hash,
+        &npm_config,
     )
     .await
 }
@@ -2344,6 +2374,46 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn package_manager_download_uses_target_workspace_registry_and_auth() {
+        use httpmock::prelude::*;
+
+        let project = create_temp_dir();
+        let cwd = AbsolutePathBuf::new(project.path().to_path_buf()).unwrap();
+        create_package_json(&cwd, "{}");
+
+        let server = MockServer::start();
+        let registry = server.base_url();
+        let authority = registry.strip_prefix("http:").unwrap();
+        fs::write(
+            cwd.join(".npmrc"),
+            format!("registry={registry}\n{authority}/:_authToken=SECRET\n"),
+        )
+        .unwrap();
+        let yarn_js = b"#!/usr/bin/env node\nconsole.log('mock yarn');\n";
+        let tarball = server.mock(|when, then| {
+            when.method(GET)
+                .path("/@yarnpkg/cli-dist/-/cli-dist-4.17.1.tgz")
+                .header("authorization", "Bearer SECRET");
+            then.status(200)
+                .header("content-type", "application/octet-stream")
+                .body(create_yarn_package_tgz(yarn_js, None));
+        });
+
+        let vp_home = create_temp_dir();
+        EnvConfig::with_vars_async([(env_vars::VP_HOME, vp_home.path().as_os_str())], |_| async {
+            let (install_dir, package_name, version) =
+                download_package_manager_for_cwd(&cwd, PackageManagerType::Yarn, "4.17.1", None)
+                    .await
+                    .unwrap();
+            assert_eq!(package_name, "@yarnpkg/cli-dist");
+            assert_eq!(version, "4.17.1");
+            assert!(install_dir.join("bin/yarn").as_path().is_file());
+            tarball.assert_hits(1);
+        })
+        .await;
+    }
+
     #[test]
     fn environment_spec_keeps_declared_version_range() {
         let temp_dir = create_temp_dir();
@@ -2531,6 +2601,54 @@ mod tests {
                 "10.1.0"
             );
             first_request.assert_hits(1);
+            second_request.assert_hits(1);
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn authenticated_latest_versions_are_not_shared_through_the_cache() {
+        use httpmock::prelude::*;
+
+        let registry = MockServer::start();
+        let registry_url = registry.base_url();
+        let authority = registry_url.strip_prefix("http:").unwrap();
+        let first_request = registry.mock(|when, then| {
+            when.method(GET).path("/pnpm/latest").header("authorization", "Bearer FIRST");
+            then.status(200).json_body(serde_json::json!({ "version": "10.1.0" }));
+        });
+        let second_request = registry.mock(|when, then| {
+            when.method(GET).path("/pnpm/latest").header("authorization", "Bearer SECOND");
+            then.status(200).json_body(serde_json::json!({ "version": "10.2.0" }));
+        });
+        let config = |token: &str| NpmConfig {
+            values: HashMap::from([
+                ("registry".to_string(), registry_url.clone()),
+                (vt_str::format!("{authority}/:_authtoken").to_string(), token.to_string()),
+            ]),
+        };
+
+        let vp_home = create_temp_dir();
+        EnvConfig::with_vars_async([(env_vars::VP_HOME, vp_home.path().as_os_str())], |_| async {
+            assert_eq!(
+                get_latest_version_with_config(PackageManagerType::Pnpm, &config("FIRST"))
+                    .await
+                    .unwrap(),
+                "10.1.0"
+            );
+            assert_eq!(
+                get_latest_version_with_config(PackageManagerType::Pnpm, &config("SECOND"))
+                    .await
+                    .unwrap(),
+                "10.2.0"
+            );
+            assert_eq!(
+                get_latest_version_with_config(PackageManagerType::Pnpm, &config("FIRST"))
+                    .await
+                    .unwrap(),
+                "10.1.0"
+            );
+            first_request.assert_hits(2);
             second_request.assert_hits(1);
         })
         .await;
