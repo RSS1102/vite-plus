@@ -1382,6 +1382,8 @@ mod tests {
         let content = b"Hello, World!";
         let mut file = tokio::fs::File::create(&test_file).await.unwrap();
         file.write_all(content).await.unwrap();
+        // Finish the background write before hashing through another file handle.
+        file.flush().await.unwrap();
 
         // Calculate the expected SRI (registry `dist.integrity` format)
         let digest = Sha512::digest(content);
