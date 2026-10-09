@@ -45,10 +45,10 @@ impl NpmConfig {
         // A default global npmrc cannot be located reliably before npm exists.
         // Honor an explicitly configured one, then layer user and project config.
         if let Some(path) = env_value("globalconfig") {
-            load_npmrc(PathBuf::from(path), &mut values);
+            load_npmrc(config_path(&path), &mut values);
         }
         let user_config = env_value("userconfig")
-            .map(PathBuf::from)
+            .map(|path| config_path(&path))
             .unwrap_or_else(|| EnvConfig::get().user_home.join(".npmrc").into_path_buf());
         load_npmrc(user_config, &mut values);
         if let Some(root) = project_root {
@@ -63,15 +63,15 @@ impl NpmConfig {
             }
             // npm preserves registry-scoped ("nerf-darted") keys verbatim.
             let key = if raw_key.starts_with("//") {
-                normalize_key(raw_key)
+                normalize_key(&expand_value(raw_key))
             } else {
                 raw_key.cow_replace('_', "-").cow_to_ascii_lowercase().into_owned()
             };
-            values.insert(key, value);
+            values.insert(key, expand_value(&value));
         }
         // Keep the existing EnvConfig precedence when both spellings are set.
         if let Some(registry) = env_value("registry") {
-            values.insert("registry".to_string(), registry);
+            values.insert("registry".to_string(), expand_value(&registry));
         }
         Self { values }
     }
@@ -164,7 +164,9 @@ impl NpmConfig {
             if let (Some(username), Some(password)) = (username, password)
                 && !username.is_empty()
                 && !password.is_empty()
-                && let Ok(decoded) = base64_simd::STANDARD.decode_to_vec(password)
+                && let Ok(decoded) = base64_simd::STANDARD
+                    .decode_to_vec(password)
+                    .or_else(|_| base64_simd::STANDARD_NO_PAD.decode_to_vec(password))
             {
                 return Some(NpmAuth::UsernamePassword { username, password: decoded });
             }
@@ -226,30 +228,47 @@ fn normalize_key(key: &str) -> String {
     .to_string()
 }
 
-fn expand_value(raw: &str) -> String {
-    let mut value = raw.trim();
-    if value.len() >= 2
-        && ((value.starts_with('"') && value.ends_with('"'))
-            || (value.starts_with('\'') && value.ends_with('\'')))
-    {
-        value = &value[1..value.len() - 1];
-    }
+fn config_path(raw: &str) -> PathBuf {
+    let path = expand_value(raw);
+    let relative = path
+        .strip_prefix("~/")
+        .or_else(|| if cfg!(windows) { path.strip_prefix("~\\") } else { None });
+    relative.map_or_else(
+        || PathBuf::from(&path),
+        |relative| EnvConfig::get().user_home.join(relative).into_path_buf(),
+    )
+}
 
+// INI quoting is handled by parse_npmrc_value; expansion must preserve literal quotes.
+fn expand_value(raw: &str) -> String {
+    let value = raw.trim();
     let mut expanded = String::with_capacity(value.len());
     let mut rest = value;
     while let Some(start) = rest.find("${") {
-        expanded.push_str(&rest[..start]);
         let Some(end) = rest[start + 2..].find('}') else {
-            expanded.push_str(&rest[start..]);
-            return expanded;
+            break;
         };
         let expression = &rest[start + 2..start + 2 + end];
         let (name, empty_if_missing) =
             expression.strip_suffix('?').map_or((expression, false), |name| (name, true));
-        match env::var(name) {
-            Ok(value) => expanded.push_str(&value),
-            Err(_) if !empty_if_missing => expanded.push_str(&rest[start..start + 3 + end]),
-            Err(_) => {}
+        if name.is_empty() || name.contains(['$', '{', '?']) {
+            expanded.push_str(&rest[..start + 2]);
+            rest = &rest[start + 2..];
+            continue;
+        }
+        let slashes = rest[..start].bytes().rev().take_while(|byte| *byte == b'\\').count();
+        expanded.push_str(&rest[..start - slashes]);
+        for _ in 0..slashes / 2 {
+            expanded.push('\\');
+        }
+        if slashes % 2 == 1 {
+            expanded.push_str(&rest[start..start + 3 + end]);
+        } else {
+            match env::var(name) {
+                Ok(value) => expanded.push_str(&value),
+                Err(_) if !empty_if_missing => expanded.push_str(&rest[start..start + 3 + end]),
+                Err(_) => {}
+            }
         }
         rest = &rest[start + 3 + end..];
     }
@@ -259,14 +278,14 @@ fn expand_value(raw: &str) -> String {
 
 fn load_npmrc(path: PathBuf, values: &mut HashMap<String, String>) {
     let Ok(contents) = fs::read_to_string(path) else { return };
-    for raw_line in contents.lines() {
+    for raw_line in contents.trim_start_matches('\u{feff}').lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else { continue };
         // Expand before normalizing so case-sensitive environment names survive.
-        let key = normalize_key(&expand_value(key));
+        let key = normalize_key(&expand_value(&parse_npmrc_value(key)));
         if !key.is_empty() {
             values.insert(key, expand_value(&parse_npmrc_value(value)));
         }
@@ -332,6 +351,221 @@ mod tests {
     fn http_client() -> reqwest::Client {
         vp_shared::ensure_tls_provider();
         reqwest::Client::new()
+    }
+
+    // Keep developer registry overrides and npmrc files out of fixture-based tests.
+    fn with_isolated_npm_config<R>(f: impl FnOnce() -> R) -> R {
+        let directory = TempDir::new().unwrap();
+        let empty_config = directory.path().join("empty.npmrc");
+        fs::write(&empty_config, "").unwrap();
+        EnvConfig::with_vars(
+            [
+                (env_vars::NPM_CONFIG_REGISTRY, None),
+                (env_vars::NPM_CONFIG_REGISTRY_UPPER, None),
+                ("npm_config_userconfig", Some(empty_config.as_os_str())),
+                ("NPM_CONFIG_USERCONFIG", Some(empty_config.as_os_str())),
+                ("npm_config_globalconfig", Some(empty_config.as_os_str())),
+                ("NPM_CONFIG_GLOBALCONFIG", Some(empty_config.as_os_str())),
+            ],
+            |_| f(),
+        )
+    }
+
+    #[test]
+    fn expands_user_and_global_config_paths() {
+        with_isolated_npm_config(|| {
+            let home = TempDir::new().unwrap();
+            fs::write(home.path().join("user.npmrc"), "//registry.example/:_authToken=USER\n")
+                .unwrap();
+            fs::write(home.path().join("global.npmrc"), "registry=https://registry.example/\n")
+                .unwrap();
+            let paths = [
+                ("~/user.npmrc", "${TEST_CONFIG_HOME}/global.npmrc"),
+                ("${TEST_CONFIG_HOME}/user.npmrc", "~/global.npmrc"),
+                #[cfg(windows)]
+                ("~\\user.npmrc", "~\\global.npmrc"),
+            ];
+            for (user_config, global_config) in paths {
+                EnvConfig::with_vars(
+                    [
+                        ("HOME", home.path().to_str().unwrap()),
+                        ("USERPROFILE", home.path().to_str().unwrap()),
+                        ("TEST_CONFIG_HOME", home.path().to_str().unwrap()),
+                        ("npm_config_userconfig", user_config),
+                        ("NPM_CONFIG_USERCONFIG", user_config),
+                        ("npm_config_globalconfig", global_config),
+                        ("NPM_CONFIG_GLOBALCONFIG", global_config),
+                    ],
+                    |_| {
+                        let config = NpmConfig::load_for_project(None);
+                        assert_eq!(config.registry_for_package("pnpm"), "https://registry.example");
+                        let url = config.package_version_url("pnpm", "latest");
+                        let request = config
+                            .apply_auth(http_client().get(url.as_str()), &url)
+                            .build()
+                            .unwrap();
+                        assert_eq!(
+                            request.headers()[reqwest::header::AUTHORIZATION],
+                            "Bearer USER"
+                        );
+                    },
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn reads_bom_prefixed_registry_and_credentials() {
+        with_isolated_npm_config(|| {
+            for contents in [
+                "\u{feff}registry=https://registry.example/\n//registry.example/:_authToken=TOKEN\n",
+                "\u{feff}//registry.example/:_authToken=TOKEN\nregistry=https://registry.example/\n",
+            ] {
+                let project = project_with_npmrc(contents);
+                EnvConfig::with_vars(std::iter::empty::<(&str, &str)>(), |_| {
+                    let config = NpmConfig::load_for_project(Some(project.path().to_path_buf()));
+                    assert_eq!(config.registry_for_package("pnpm"), "https://registry.example");
+                    let url = config.package_version_url("pnpm", "latest");
+                    let request =
+                        config.apply_auth(http_client().get(url.as_str()), &url).build().unwrap();
+                    assert_eq!(request.headers()[reqwest::header::AUTHORIZATION], "Bearer TOKEN");
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn expands_environment_credential_keys_and_values() {
+        with_isolated_npm_config(|| {
+            for (key, value) in [
+                ("npm_config_//${TEST_AUTH_HOST}/Team/:_authToken", "TOKEN"),
+                ("npm_config_//registry.example/Team/:_authToken", "${TEST_AUTH_TOKEN}"),
+                ("npm_config_//${TEST_AUTH_HOST}/Team/:_authToken", "${TEST_AUTH_TOKEN}"),
+            ] {
+                EnvConfig::with_vars(
+                    [
+                        ("TEST_AUTH_HOST", "Registry.Example"),
+                        ("TEST_AUTH_TOKEN", "TOKEN"),
+                        (key, value),
+                    ],
+                    |_| {
+                        let config = NpmConfig::load_for_project(None);
+                        let url = "https://registry.example/Team/pkg";
+                        let request =
+                            config.apply_auth(http_client().get(url), url).build().unwrap();
+                        assert_eq!(
+                            request.headers()[reqwest::header::AUTHORIZATION],
+                            "Bearer TOKEN",
+                            "{key}={value}"
+                        );
+                        let other = "https://registry.example/team/pkg";
+                        assert!(
+                            !config
+                                .apply_auth(http_client().get(other), other)
+                                .build()
+                                .unwrap()
+                                .headers()
+                                .contains_key(reqwest::header::AUTHORIZATION)
+                        );
+                    },
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn preserves_escaped_variables_and_expands_even_backslashes() {
+        with_isolated_npm_config(|| {
+            EnvConfig::with_vars(
+                [
+                    ("TEST_EXPANSION", Some("TOKEN")),
+                    ("TEST_MISSING", None),
+                    // These process environment names must not make invalid npm expressions expand.
+                    ("TEST?EXPANSION", Some("TOKEN")),
+                    ("TEST{EXPANSION", Some("TOKEN")),
+                    ("$TEST_EXPANSION", Some("TOKEN")),
+                ],
+                |_| {
+                    for (input, expected) in [
+                        (r"${TEST_EXPANSION}", "TOKEN"),
+                        (r"\${TEST_EXPANSION}", "${TEST_EXPANSION}"),
+                        (r"\\${TEST_EXPANSION}", r"\TOKEN"),
+                        (r"\\\${TEST_EXPANSION}", r"\${TEST_EXPANSION}"),
+                        (r"${TEST_MISSING}", "${TEST_MISSING}"),
+                        (r"${TEST_MISSING?}", ""),
+                        (r"\${TEST_MISSING?}", "${TEST_MISSING?}"),
+                        (r"${TEST_EXPANSION", "${TEST_EXPANSION"),
+                        (r"${}", "${}"),
+                        (r"${?}", "${?}"),
+                        (r"${TEST?EXPANSION}", "${TEST?EXPANSION}"),
+                        (r"${TEST{EXPANSION}", "${TEST{EXPANSION}"),
+                        (r"${$TEST_EXPANSION}", "${$TEST_EXPANSION}"),
+                    ] {
+                        assert_eq!(expand_value(input), expected, "{input}");
+                    }
+                    let project = project_with_npmrc(
+                        "//registry.example/:_authToken=literal\\${TEST_EXPANSION}\n",
+                    );
+                    let config = NpmConfig::load_for_project(Some(project.path().to_path_buf()));
+                    let url = "https://registry.example/pkg";
+                    let request = config.apply_auth(http_client().get(url), url).build().unwrap();
+                    assert_eq!(
+                        request.headers()[reqwest::header::AUTHORIZATION],
+                        "Bearer literal${TEST_EXPANSION}"
+                    );
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn preserves_literal_quotes_in_basic_username() {
+        with_isolated_npm_config(|| {
+            let project = project_with_npmrc(
+                "//registry.example/:username=\"\\\"user\\\"\"\n//registry.example/:_password=cw==\n",
+            );
+            EnvConfig::with_vars(std::iter::empty::<(&str, &str)>(), |_| {
+                let config = NpmConfig::load_for_project(Some(project.path().to_path_buf()));
+                let url = "https://registry.example/pkg";
+                let request = config.apply_auth(http_client().get(url), url).build().unwrap();
+                assert_eq!(request.headers()[reqwest::header::AUTHORIZATION], "Basic InVzZXIiOnM=");
+            });
+        });
+    }
+
+    #[test]
+    fn accepts_padded_and_unpadded_basic_passwords() {
+        for password in ["cw", "cw==", "c2U", "c2U=", "c2Vj"] {
+            let config = NpmConfig {
+                values: HashMap::from([
+                    ("//registry.example/:username".to_string(), "user".to_string()),
+                    ("//registry.example/:_password".to_string(), password.to_string()),
+                ]),
+            };
+            let url = "https://registry.example/pkg";
+            let request = config.apply_auth(http_client().get(url), url).build().unwrap();
+            let expected = match password {
+                "cw" | "cw==" => "Basic dXNlcjpz",
+                "c2U" | "c2U=" => "Basic dXNlcjpzZQ==",
+                _ => "Basic dXNlcjpzZWM=",
+            };
+            assert_eq!(request.headers()[reqwest::header::AUTHORIZATION], expected);
+        }
+        let config = NpmConfig {
+            values: HashMap::from([
+                ("//registry.example/:username".to_string(), "user".to_string()),
+                ("//registry.example/:_password".to_string(), "%%%".to_string()),
+            ]),
+        };
+        let url = "https://registry.example/pkg";
+        assert!(
+            !config
+                .apply_auth(http_client().get(url), url)
+                .build()
+                .unwrap()
+                .headers()
+                .contains_key(reqwest::header::AUTHORIZATION)
+        );
     }
 
     #[test]
@@ -602,19 +836,23 @@ mod tests {
 
     #[test]
     fn accepts_auth_paths_with_or_without_a_trailing_slash() {
-        let project = project_with_npmrc(
-            "//registry.example/team:_authToken=NO_SLASH\n//registry.example/other/:_authToken=SLASH\n",
-        );
-        let config = NpmConfig::load_for_project(Some(project.path().to_path_buf()));
-        for (path, token) in [("team/pkg", "NO_SLASH"), ("other/pkg", "SLASH")] {
-            let url = vt_str::format!("https://registry.example/{path}");
-            let request =
-                config.apply_auth(http_client().get(url.as_str()), url.as_str()).build().unwrap();
-            assert_eq!(
-                request.headers()[reqwest::header::AUTHORIZATION],
-                vt_str::format!("Bearer {token}").as_str()
+        with_isolated_npm_config(|| {
+            let project = project_with_npmrc(
+                "//registry.example/team:_authToken=NO_SLASH\n//registry.example/other/:_authToken=SLASH\n",
             );
-        }
+            let config = NpmConfig::load_for_project(Some(project.path().to_path_buf()));
+            for (path, token) in [("team/pkg", "NO_SLASH"), ("other/pkg", "SLASH")] {
+                let url = vt_str::format!("https://registry.example/{path}");
+                let request = config
+                    .apply_auth(http_client().get(url.as_str()), url.as_str())
+                    .build()
+                    .unwrap();
+                assert_eq!(
+                    request.headers()[reqwest::header::AUTHORIZATION],
+                    vt_str::format!("Bearer {token}").as_str()
+                );
+            }
+        });
     }
 
     #[test]
@@ -685,25 +923,27 @@ mod tests {
 
     #[test]
     fn registry_auth_paths_remain_case_sensitive() {
-        let project = project_with_npmrc("//registry.example/Team/:_authToken=SECRET\n");
-        let config = NpmConfig::load_for_project(Some(project.path().to_path_buf()));
+        with_isolated_npm_config(|| {
+            let project = project_with_npmrc("//registry.example/Team/:_authToken=SECRET\n");
+            let config = NpmConfig::load_for_project(Some(project.path().to_path_buf()));
 
-        let matching = config
-            .apply_auth(
-                http_client().get("https://registry.example/Team/pkg"),
-                "https://registry.example/Team/pkg",
-            )
-            .build()
-            .unwrap();
-        assert_eq!(matching.headers()[reqwest::header::AUTHORIZATION], "Bearer SECRET");
+            let matching = config
+                .apply_auth(
+                    http_client().get("https://registry.example/Team/pkg"),
+                    "https://registry.example/Team/pkg",
+                )
+                .build()
+                .unwrap();
+            assert_eq!(matching.headers()[reqwest::header::AUTHORIZATION], "Bearer SECRET");
 
-        let different_case = config
-            .apply_auth(
-                http_client().get("https://registry.example/team/pkg"),
-                "https://registry.example/team/pkg",
-            )
-            .build()
-            .unwrap();
-        assert!(!different_case.headers().contains_key(reqwest::header::AUTHORIZATION));
+            let different_case = config
+                .apply_auth(
+                    http_client().get("https://registry.example/team/pkg"),
+                    "https://registry.example/team/pkg",
+                )
+                .build()
+                .unwrap();
+            assert!(!different_case.headers().contains_key(reqwest::header::AUTHORIZATION));
+        });
     }
 }
