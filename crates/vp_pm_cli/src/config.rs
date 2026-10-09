@@ -270,7 +270,8 @@ fn load_npmrc(path: PathBuf, values: &mut HashMap<String, String>) {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else { continue };
-        let key = normalize_key(key);
+        // Expand before normalizing so case-sensitive environment names survive.
+        let key = normalize_key(&expand_value(key));
         if !key.is_empty() {
             values.insert(key, expand_value(&parse_npmrc_value(value)));
         }
@@ -492,6 +493,33 @@ mod tests {
                 .unwrap();
             assert_eq!(request.headers()[reqwest::header::AUTHORIZATION], "Bearer TEAM");
         });
+    }
+
+    #[test]
+    fn expands_registry_and_credential_keys_before_normalization() {
+        let project = project_with_npmrc(
+            "registry=https://${TEST_REGISTRY_HOST}/Team/\n//${TEST_REGISTRY_HOST}/Team/:_authToken=${TEST_NPM_TOKEN}\n",
+        );
+        EnvConfig::with_vars(
+            [
+                ("TEST_REGISTRY_HOST", Some("Registry.Example")),
+                ("TEST_NPM_TOKEN", Some("TEAM")),
+                (env_vars::NPM_CONFIG_REGISTRY, None),
+                (env_vars::NPM_CONFIG_REGISTRY_UPPER, None),
+            ],
+            |_| {
+                let config = NpmConfig::load_for_project(Some(project.path().to_path_buf()));
+                assert_eq!(config.registry_for_package("pnpm"), "https://Registry.Example/Team");
+                let url = config.package_version_url("pnpm", "latest");
+                let request =
+                    config.apply_auth(http_client().get(url.as_str()), &url).build().unwrap();
+                assert_eq!(request.headers()[reqwest::header::AUTHORIZATION], "Bearer TEAM");
+                let other_url = "https://registry.example/team/pnpm/latest";
+                let other =
+                    config.apply_auth(http_client().get(other_url), other_url).build().unwrap();
+                assert!(!other.headers().contains_key(reqwest::header::AUTHORIZATION));
+            },
+        );
     }
 
     #[test]

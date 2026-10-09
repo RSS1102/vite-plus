@@ -936,7 +936,9 @@ fn latest_version_cache_path(
     Ok(vp_shared::EnvConfig::get()
         .dirs
         .cache
-        .join("package_manager_latest")
+        // The legacy namespace contains files named after package managers.
+        // Keep it untouched: those versions have no registry provenance.
+        .join("package_manager_latest_v2")
         .join(package_manager_type.to_string())
         .join(registry_key))
 }
@@ -2527,6 +2529,52 @@ mod tests {
                 );
             },
         )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn latest_version_cache_handles_legacy_cache_files() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mut request = server.mock(|when, then| {
+            when.method(GET).path("/pnpm/latest");
+            then.status(200).json_body(serde_json::json!({ "version": "10.2.0" }));
+        });
+        let config =
+            NpmConfig { values: HashMap::from([("registry".to_string(), server.base_url())]) };
+        let vp_home = create_temp_dir();
+        EnvConfig::with_vars_async([(env_vars::VP_HOME, vp_home.path().as_os_str())], |_| async {
+            // The legacy cache has no registry provenance and must not be reused.
+            let legacy_path =
+                EnvConfig::get().dirs.cache.join("package_manager_latest").join("pnpm");
+            fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+            fs::write(&legacy_path, "10.1.0").unwrap();
+            for _ in 0..2 {
+                assert_eq!(
+                    get_latest_version_with_config(PackageManagerType::Pnpm, &config)
+                        .await
+                        .unwrap(),
+                    "10.2.0"
+                );
+            }
+            request.assert_hits(1);
+            assert_eq!(fs::read_to_string(&legacy_path).unwrap(), "10.1.0");
+
+            let cache_path =
+                latest_version_cache_path(PackageManagerType::Pnpm, &server.base_url()).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&cache_path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))
+                .unwrap();
+            request.delete();
+            assert_eq!(
+                get_latest_version_with_config(PackageManagerType::Pnpm, &config).await.unwrap(),
+                "10.2.0"
+            );
+        })
         .await;
     }
 
