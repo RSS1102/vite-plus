@@ -144,42 +144,37 @@ impl NpmConfig {
         let authority = url
             .port()
             .map_or_else(|| host.to_string(), |port| vt_str::format!("{host}:{port}").to_string());
-        let segments: Vec<_> = url
-            .path_segments()
-            .into_iter()
-            .flatten()
-            .filter(|segment| !segment.is_empty())
-            .collect();
-
-        // Match npm-registry-fetch: the most specific URL path wins.
-        for length in (0..=segments.len()).rev() {
-            let path = if length == 0 {
-                "/".to_string()
-            } else {
-                vt_str::format!("/{}/", segments[..length].join("/")).to_string()
-            };
-            let prefix = vt_str::format!("//{}{path}", authority.cow_to_ascii_lowercase());
-            for prefix in [prefix.as_str(), prefix.trim_end_matches('/')] {
-                if let Some(token) =
-                    self.values.get(vt_str::format!("{prefix}:_authtoken").as_str())
-                    && !token.is_empty()
-                {
-                    return Some(NpmAuth::Token(token));
-                }
-                if let Some(auth) = self.values.get(vt_str::format!("{prefix}:_auth").as_str())
-                    && !auth.is_empty()
-                {
-                    return Some(NpmAuth::Encoded(auth));
-                }
-                let username = self.values.get(vt_str::format!("{prefix}:username").as_str());
-                let password = self.values.get(vt_str::format!("{prefix}:_password").as_str());
-                if let (Some(username), Some(password)) = (username, password)
-                    && !username.is_empty()
-                    && !password.is_empty()
-                    && let Ok(decoded) = base64_simd::STANDARD.decode_to_vec(password)
-                {
-                    return Some(NpmAuth::UsernamePassword { username, password: decoded });
-                }
+        // Walk the original pathname like npm-registry-fetch. Removing empty
+        // segments or adding a trailing slash would broaden the credential scope.
+        let mut prefix =
+            vt_str::format!("//{}{}", authority.cow_to_ascii_lowercase(), url.path()).to_string();
+        while prefix.len() > 2 {
+            if let Some(token) = self.values.get(vt_str::format!("{prefix}:_authtoken").as_str())
+                && !token.is_empty()
+            {
+                return Some(NpmAuth::Token(token));
+            }
+            if let Some(auth) = self.values.get(vt_str::format!("{prefix}:_auth").as_str())
+                && !auth.is_empty()
+            {
+                return Some(NpmAuth::Encoded(auth));
+            }
+            let username = self.values.get(vt_str::format!("{prefix}:username").as_str());
+            let password = self.values.get(vt_str::format!("{prefix}:_password").as_str());
+            if let (Some(username), Some(password)) = (username, password)
+                && !username.is_empty()
+                && !password.is_empty()
+                && let Ok(decoded) = base64_simd::STANDARD.decode_to_vec(password)
+            {
+                return Some(NpmAuth::UsernamePassword { username, password: decoded });
+            }
+            // Remove either the final slash or the final non-slash segment.
+            // This checks both directory and non-directory keys without changing
+            // the request's path or collapsing repeated slashes.
+            if prefix.ends_with('/') {
+                prefix.pop();
+            } else if let Some(slash) = prefix.rfind('/') {
+                prefix.truncate(slash + 1);
             }
         }
         None
@@ -615,6 +610,72 @@ mod tests {
             let url = vt_str::format!("https://registry.example/{path}");
             let request =
                 config.apply_auth(http_client().get(url.as_str()), url.as_str()).build().unwrap();
+            assert_eq!(
+                request.headers()[reqwest::header::AUTHORIZATION],
+                vt_str::format!("Bearer {token}").as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn registry_auth_preserves_exact_path_boundaries() {
+        let client = http_client();
+        for credentials in [
+            vec![("_authtoken", "SECRET".to_string())],
+            vec![("_auth", base64_simd::STANDARD.encode_to_string("user:secret"))],
+            vec![
+                ("username", "user".to_string()),
+                ("_password", base64_simd::STANDARD.encode_to_string("secret")),
+            ],
+        ] {
+            let config = NpmConfig {
+                values: credentials
+                    .into_iter()
+                    .map(|(key, value)| {
+                        (
+                            vt_str::format!("//registry.example/team/private/:{key}").to_string(),
+                            value,
+                        )
+                    })
+                    .collect(),
+            };
+            for (path, authenticated) in [
+                ("/team/private/pkg", true),
+                ("/team/private/", true),
+                ("/team/private//pkg", true),
+                ("/team//private/pkg", false),
+                ("//team/private/pkg", false),
+                ("/team/private", false),
+                ("/team/private-other/pkg", false),
+            ] {
+                let url = vt_str::format!("https://registry.example{path}");
+                let request = config.apply_auth(client.get(url.as_str()), &url).build().unwrap();
+                assert_eq!(
+                    request.headers().contains_key(reqwest::header::AUTHORIZATION),
+                    authenticated,
+                    "unexpected authentication for {path}"
+                );
+                assert_eq!(request.url().path(), path);
+            }
+        }
+    }
+
+    #[test]
+    fn registry_auth_matches_credentials_with_repeated_slashes() {
+        let config = NpmConfig {
+            values: HashMap::from([
+                ("//registry.example/team//private/:_authtoken".to_string(), "EXACT".to_string()),
+                ("//registry.example/team/:_authtoken".to_string(), "PARENT".to_string()),
+            ]),
+        };
+        let client = http_client();
+        for (path, token) in [
+            ("/team//private/pkg", "EXACT"),
+            ("/team/private/pkg", "PARENT"),
+            ("/team//private", "PARENT"),
+        ] {
+            let url = vt_str::format!("https://registry.example{path}");
+            let request = config.apply_auth(client.get(url.as_str()), &url).build().unwrap();
             assert_eq!(
                 request.headers()[reqwest::header::AUTHORIZATION],
                 vt_str::format!("Bearer {token}").as_str()

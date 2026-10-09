@@ -917,7 +917,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
-            for _ in 0..4 {
+            for _ in 0..8 {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut bytes = Vec::new();
                 loop {
@@ -949,6 +949,18 @@ mod tests {
                     "/public/package.tgz" => {
                         "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\narchive"
                     }
+                    "/team/private/metadata" => {
+                        "HTTP/1.1 302 Found\r\nLocation: /team//private/metadata\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    }
+                    "/team//private/metadata" => {
+                        "HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"value\":true}"
+                    }
+                    "/team/private/package.tgz" => {
+                        "HTTP/1.1 302 Found\r\nLocation: /team/private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    }
+                    "/team/private" => {
+                        "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\narchive"
+                    }
                     _ => panic!("unexpected request path: {path}"),
                 };
                 socket.write_all(response.as_bytes()).await.unwrap();
@@ -961,10 +973,16 @@ mod tests {
             0,
             0,
             NpmConfig {
-                values: std::collections::HashMap::from([(
-                    vt_str::format!("//{addr}/private/:_authtoken").to_string(),
-                    "SECRET".to_string(),
-                )]),
+                values: std::collections::HashMap::from([
+                    (
+                        vt_str::format!("//{addr}/private/:_authtoken").to_string(),
+                        "SECRET".to_string(),
+                    ),
+                    (
+                        vt_str::format!("//{addr}/team/private/:_authtoken").to_string(),
+                        "SECRET".to_string(),
+                    ),
+                ]),
             },
         );
         let metadata: serde_json::Value =
@@ -978,6 +996,18 @@ mod tests {
 
         assert_eq!(metadata, serde_json::json!({ "value": true }));
         assert_eq!(fs::read(archive).unwrap(), b"archive");
+        let metadata: serde_json::Value =
+            client.get_json(&vt_str::format!("http://{addr}/team/private/metadata")).await.unwrap();
+        client
+            .download_file(
+                &vt_str::format!("http://{addr}/team/private/package.tgz"),
+                &target.path().join("boundary.tgz"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(metadata, serde_json::json!({ "value": true }));
+        assert_eq!(fs::read(target.path().join("boundary.tgz")).unwrap(), b"archive");
         let requests =
             tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap();
         assert_eq!(
@@ -987,6 +1017,10 @@ mod tests {
                 ("/public/metadata".to_string(), false),
                 ("/private/package.tgz".to_string(), true),
                 ("/public/package.tgz".to_string(), false),
+                ("/team/private/metadata".to_string(), true),
+                ("/team//private/metadata".to_string(), false),
+                ("/team/private/package.tgz".to_string(), true),
+                ("/team/private".to_string(), false),
             ]
         );
     }
