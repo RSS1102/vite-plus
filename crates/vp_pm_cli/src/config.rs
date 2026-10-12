@@ -29,28 +29,40 @@ impl NpmConfig {
     }
 
     pub(crate) fn load_for_cwd(cwd: &AbsolutePath) -> Self {
-        find_workspace_root(cwd).map_or_else(
-            |_| Self::load_for_project_root(cwd),
-            |(root, _)| Self::load_for_project_root(&root.path),
-        )
-    }
-
-    pub(crate) fn load_for_project_root(project_root: &AbsolutePath) -> Self {
-        Self::load_for_project(Some(project_root.as_path().to_path_buf()))
+        let project_root = find_workspace_root(cwd).map_or_else(
+            |_| cwd.as_path().to_path_buf(),
+            |(root, _)| root.path.as_path().to_path_buf(),
+        );
+        // Workspace root locates project npmrc; the caller's cwd resolves relative file paths.
+        Self::load_for_project_with_cwd(Some(project_root), Some(cwd))
     }
 
     fn load_for_project(project_root: Option<PathBuf>) -> Self {
-        let mut values = HashMap::new();
+        Self::load_for_project_with_cwd(project_root, None)
+    }
 
-        // A default global npmrc cannot be located reliably before npm exists.
-        // Honor an explicitly configured one, then layer user and project config.
-        if let Some(path) = env_value("globalconfig") {
-            load_npmrc(config_path(&path), &mut values);
-        }
+    fn load_for_project_with_cwd(
+        project_root: Option<PathBuf>,
+        cwd: Option<&AbsolutePath>,
+    ) -> Self {
         let user_config = env_value("userconfig")
-            .map(|path| config_path(&path))
+            .map(|path| config_path(&expand_value(&path), cwd))
             .unwrap_or_else(|| EnvConfig::get().user_home.join(".npmrc").into_path_buf());
-        load_npmrc(user_config, &mut values);
+        let mut user_values = HashMap::new();
+        load_npmrc(user_config, &mut user_values);
+
+        // Read the user layer to locate global config, but merge global values first.
+        // Preserve explicit environment overrides; default global paths require npm.
+        let global_config = env_value("globalconfig").map(|path| expand_value(&path));
+        let mut values = HashMap::new();
+        if let Some(path) = global_config
+            .as_deref()
+            .or_else(|| user_values.get("globalconfig").map(String::as_str))
+            .filter(|path| !path.is_empty())
+        {
+            load_npmrc(config_path(path, cwd), &mut values);
+        }
+        values.extend(user_values);
         if let Some(root) = project_root {
             load_npmrc(root.join(".npmrc"), &mut values);
         }
@@ -228,13 +240,19 @@ fn normalize_key(key: &str) -> String {
     .to_string()
 }
 
-fn config_path(raw: &str) -> PathBuf {
-    let path = expand_value(raw);
+// Config sources expand values once; preserve escaped variables in file paths.
+fn config_path(path: &str, cwd: Option<&AbsolutePath>) -> PathBuf {
     let relative = path
         .strip_prefix("~/")
         .or_else(|| if cfg!(windows) { path.strip_prefix("~\\") } else { None });
     relative.map_or_else(
-        || PathBuf::from(&path),
+        || {
+            let path = PathBuf::from(path);
+            if let Some(cwd) = cwd.filter(|_| path.is_relative()) {
+                return cwd.as_path().join(path);
+            }
+            path
+        },
         |relative| EnvConfig::get().user_home.join(relative).into_path_buf(),
     )
 }
@@ -369,6 +387,211 @@ mod tests {
             ],
             |_| f(),
         )
+    }
+
+    #[test]
+    fn relative_config_paths_use_caller_cwd_without_changing_workspace_root() {
+        with_isolated_npm_config(|| {
+            let project = project_with_npmrc("registry=https://target.example/\n");
+            fs::write(project.path().join("pnpm-workspace.yaml"), "packages:\n  - packages/*\n")
+                .unwrap();
+            let child = project.path().join("packages/child");
+            fs::create_dir_all(&child).unwrap();
+            fs::write(child.join("package.json"), "{}").unwrap();
+            fs::write(child.join("user.npmrc"), "globalconfig=./global.npmrc\n").unwrap();
+            for (directory, token) in [(child.as_path(), "TARGET"), (project.path(), "WRONG")] {
+                fs::write(
+                    directory.join("global.npmrc"),
+                    vt_str::format!("//target.example/:_authToken={token}\n").as_str(),
+                )
+                .unwrap();
+            }
+            fs::write(project.path().join("user.npmrc"), "//target.example/:_authToken=WRONG\n")
+                .unwrap();
+            let user = child.join("user.npmrc");
+            let cwd = AbsolutePath::new(&child).unwrap();
+            assert_ne!(vt_path::current_dir().unwrap().as_path(), child);
+            for (user_selector, global_selector) in [
+                (std::ffi::OsStr::new("./user.npmrc"), None),
+                (user.as_os_str(), Some(std::ffi::OsStr::new("./global.npmrc"))),
+            ] {
+                EnvConfig::with_vars(
+                    [
+                        ("npm_config_userconfig", Some(user_selector)),
+                        ("NPM_CONFIG_USERCONFIG", Some(user_selector)),
+                        ("npm_config_globalconfig", global_selector),
+                        ("NPM_CONFIG_GLOBALCONFIG", global_selector),
+                    ],
+                    |_| {
+                        let config = NpmConfig::load_for_cwd(cwd);
+                        assert_eq!(config.registry_for_package("pnpm"), "https://target.example");
+                        let url = config.package_version_url("pnpm", "latest");
+                        let request = config
+                            .apply_auth(http_client().get(url.as_str()), &url)
+                            .build()
+                            .unwrap();
+                        assert_eq!(
+                            request.headers()[reqwest::header::AUTHORIZATION],
+                            "Bearer TARGET"
+                        );
+                    },
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn loads_global_config_selected_by_user_npmrc() {
+        with_isolated_npm_config(|| {
+            let home = TempDir::new().unwrap();
+            let project = project_with_npmrc("registry=https://registry.example/\n");
+            for (selector, filename) in [
+                ("${TEST_CONFIG_HOME}/global.npmrc", "global.npmrc"),
+                ("~/global.npmrc", "global.npmrc"),
+                (r"${TEST_CONFIG_HOME}/\${TEST_GLOBAL_NAME}.npmrc", "${TEST_GLOBAL_NAME}.npmrc"),
+            ] {
+                fs::write(
+                    home.path().join(".npmrc"),
+                    vt_str::format!("globalconfig={selector}\n").as_str(),
+                )
+                .unwrap();
+                fs::write(
+                    home.path().join(filename),
+                    "registry=https://global.example/\n//registry.example/:_authToken=GLOBAL\n",
+                )
+                .unwrap();
+                EnvConfig::with_vars(
+                    [
+                        ("HOME", Some(home.path().as_os_str())),
+                        ("USERPROFILE", Some(home.path().as_os_str())),
+                        ("TEST_CONFIG_HOME", Some(home.path().as_os_str())),
+                        ("TEST_GLOBAL_NAME", Some(std::ffi::OsStr::new("missing"))),
+                        ("npm_config_userconfig", None),
+                        ("NPM_CONFIG_USERCONFIG", None),
+                        ("npm_config_globalconfig", None),
+                        ("NPM_CONFIG_GLOBALCONFIG", None),
+                    ],
+                    |_| {
+                        let config =
+                            NpmConfig::load_for_project(Some(project.path().to_path_buf()));
+                        assert_eq!(config.registry_for_package("pnpm"), "https://registry.example");
+                        let url = config.package_version_url("pnpm", "latest");
+                        let request = config
+                            .apply_auth(http_client().get(url.as_str()), &url)
+                            .build()
+                            .unwrap();
+                        assert_eq!(
+                            request.headers()[reqwest::header::AUTHORIZATION],
+                            "Bearer GLOBAL",
+                            "{selector}"
+                        );
+                    },
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn selected_global_config_stays_below_user_project_and_environment() {
+        with_isolated_npm_config(|| {
+            let files = TempDir::new().unwrap();
+            let global = files.path().join("global.npmrc");
+            let user = files.path().join("user.npmrc");
+            fs::write(
+                &global,
+                "registry=https://global.example/\n//registry.example/:_authToken=GLOBAL\n",
+            )
+            .unwrap();
+            fs::write(&user, vt_str::format!("globalconfig={}\nregistry=https://user.example/\n//registry.example/:_authToken=USER\n", global.display()).as_str()).unwrap();
+            let project = project_with_npmrc(
+                "registry=https://project.example/\n//registry.example/:_authToken=PROJECT\n",
+            );
+            EnvConfig::with_vars(
+                [
+                    ("npm_config_userconfig", Some(user.as_os_str())),
+                    ("NPM_CONFIG_USERCONFIG", Some(user.as_os_str())),
+                    ("npm_config_globalconfig", None),
+                    ("NPM_CONFIG_GLOBALCONFIG", None),
+                ],
+                |_| {
+                    for (root, registry, token) in [
+                        (None, "https://user.example", "USER"),
+                        (Some(project.path().to_path_buf()), "https://project.example", "PROJECT"),
+                    ] {
+                        let config = NpmConfig::load_for_project(root);
+                        assert_eq!(config.registry_for_package("pnpm"), registry);
+                        let url = "https://registry.example/pkg";
+                        let request =
+                            config.apply_auth(http_client().get(url), url).build().unwrap();
+                        assert_eq!(
+                            request.headers()[reqwest::header::AUTHORIZATION],
+                            vt_str::format!("Bearer {token}").as_str()
+                        );
+                    }
+                    EnvConfig::with_vars(
+                        [
+                            (env_vars::NPM_CONFIG_REGISTRY, "https://env.example"),
+                            ("npm_config_//registry.example/:_authToken", "ENV"),
+                        ],
+                        |_| {
+                            let config =
+                                NpmConfig::load_for_project(Some(project.path().to_path_buf()));
+                            assert_eq!(config.registry_for_package("pnpm"), "https://env.example");
+                            let url = "https://registry.example/pkg";
+                            let request =
+                                config.apply_auth(http_client().get(url), url).build().unwrap();
+                            assert_eq!(
+                                request.headers()[reqwest::header::AUTHORIZATION],
+                                "Bearer ENV"
+                            );
+                        },
+                    );
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn environment_globalconfig_selects_file_before_user_setting() {
+        with_isolated_npm_config(|| {
+            let files = TempDir::new().unwrap();
+            let user_global = files.path().join("user-global.npmrc");
+            let env_global = files.path().join("env-global.npmrc");
+            let user = files.path().join("user.npmrc");
+            fs::write(&user_global, "//registry.example/:_authToken=USER_GLOBAL\n").unwrap();
+            fs::write(&env_global, "//registry.example/:_authToken=ENV_GLOBAL\n").unwrap();
+            fs::write(&user, vt_str::format!("globalconfig={}\n", user_global.display()).as_str())
+                .unwrap();
+            for (selector, expected) in [
+                ("${TEST_CONFIG_HOME}/env-global.npmrc", Some("Bearer ENV_GLOBAL")),
+                ("${TEST_CONFIG_HOME}/missing.npmrc", None),
+                ("", Some("Bearer USER_GLOBAL")),
+            ] {
+                EnvConfig::with_vars(
+                    [
+                        ("npm_config_userconfig", user.as_os_str()),
+                        ("NPM_CONFIG_USERCONFIG", user.as_os_str()),
+                        ("TEST_CONFIG_HOME", files.path().as_os_str()),
+                        ("npm_config_globalconfig", std::ffi::OsStr::new(selector)),
+                        ("NPM_CONFIG_GLOBALCONFIG", std::ffi::OsStr::new(selector)),
+                    ],
+                    |_| {
+                        let config = NpmConfig::load_for_project(None);
+                        let url = "https://registry.example/pkg";
+                        let request =
+                            config.apply_auth(http_client().get(url), url).build().unwrap();
+                        assert_eq!(
+                            request
+                                .headers()
+                                .get(reqwest::header::AUTHORIZATION)
+                                .map(|value| value.to_str().unwrap()),
+                            expected,
+                            "{selector}"
+                        );
+                    },
+                );
+            }
+        });
     }
 
     #[test]
