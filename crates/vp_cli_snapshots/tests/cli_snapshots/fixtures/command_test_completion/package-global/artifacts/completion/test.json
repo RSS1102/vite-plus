@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "vitePlusVersion": "1.2.0",
+  "vitestVersion": "5.0.5",
+  "globalOptions": [
+    {
+      "rawName": "--global-option",
+      "flags": [
+        "--global-option"
+      ],
+      "description": "global option",
+      "valueMode": "none",
+      "negated": false
+    }
+  ],
+  "commands": [
+    {
+      "name": "",
+      "rawName": "[...filters]",
+      "description": "",
+      "options": []
+    },
+    {
+      "name": "run",
+      "rawName": "run [...filters]",
+      "description": "Run once",
+      "options": []
+    }
+  ]
+}
