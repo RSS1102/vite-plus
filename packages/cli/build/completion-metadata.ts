@@ -6,11 +6,9 @@ import { pathToFileURL } from 'node:url';
 type CLI = ReturnType<(typeof import('vitest/node'))['createCLI']>;
 
 export interface OptionMetadata {
-  rawName: string;
   flags: string[];
   description: string;
   valueMode: 'none' | 'required' | 'optional';
-  negated: boolean;
 }
 
 export interface TestCompletionMetadata {
@@ -20,8 +18,6 @@ export interface TestCompletionMetadata {
   globalOptions: OptionMetadata[];
   commands: {
     name: string;
-    rawName: string;
-    description: string;
     options: OptionMetadata[];
   }[];
 }
@@ -51,18 +47,14 @@ export function extractCompletionMetadata(
           ? flag.length - 2 > 256 || !/^--[A-Za-z0-9][A-Za-z0-9._-]*$/.test(flag)
           : !/^-[A-Za-z0-9]$/.test(flag),
       ) ||
-      Buffer.byteLength(value.rawName) > 1024 ||
-      Buffer.byteLength(value.description ?? '') > 16384 ||
-      (value.negated && !flags.some((flag) => flag.startsWith('--no-')))
+      Buffer.byteLength(value.description ?? '') > 16384
     ) {
       throw new Error(`Unsupported Vitest option declaration: ${value.rawName}`);
     }
     return {
-      rawName: value.rawName,
       flags,
       description: value.description ?? '',
       valueMode: value.isBoolean ? 'none' : value.required ? 'required' : 'optional',
-      negated: value.negated,
     };
   }
 
@@ -73,8 +65,6 @@ export function extractCompletionMetadata(
     globalOptions: cli.globalCommand.options.map(option),
     commands: cli.commands.map((command) => ({
       name: command.name,
-      rawName: command.rawName,
-      description: command.description ?? '',
       options: command.options.map(option),
     })),
   };
@@ -87,8 +77,6 @@ export function extractCompletionMetadata(
       !/^[A-Za-z0-9-]*$/.test(command.name) ||
       command.name.length > 64 ||
       names.has(command.name) ||
-      Buffer.byteLength(command.rawName) > 1024 ||
-      Buffer.byteLength(command.description) > 16384 ||
       command.options.length > 2048
     ) {
       throw new Error(`Unsupported Vitest command declaration: ${command.name}`);
@@ -116,8 +104,7 @@ export function extractCompletionMetadata(
         if (
           inherited &&
           (inherited.flags.join(',') !== option.flags.join(',') ||
-            inherited.valueMode !== option.valueMode ||
-            inherited.negated !== option.negated)
+            inherited.valueMode !== option.valueMode)
         ) {
           throw new Error(`Incompatible inherited Vitest option: ${primary}`);
         }
@@ -169,14 +156,6 @@ export async function writeTestCompletionMetadata(
     packageJson.version,
     vitestPackage.version,
   );
-  const repeated = extractCompletionMetadata(
-    createCLI(),
-    packageJson.version,
-    vitestPackage.version,
-  );
-  if (JSON.stringify(metadata) !== JSON.stringify(repeated)) {
-    throw new Error('Vitest CLI completion metadata is not deterministic');
-  }
   const directory = join(packageDir, 'dist/completion');
   await mkdir(directory, { recursive: true });
   await writeFile(join(directory, 'test.json'), `${JSON.stringify(metadata, null, 2)}\n`);

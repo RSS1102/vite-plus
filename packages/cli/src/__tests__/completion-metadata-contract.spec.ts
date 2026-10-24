@@ -19,28 +19,8 @@ function metadata(cli = createCLI()) {
 // These checks exercise the public surface consumed by the adapter. Command
 // names, counts, aliases, descriptions and parser transforms are not frozen.
 describe('public createCLI metadata contract (installed Vitest)', () => {
-  it('reads command and option fields through the public return type', () => {
+  it('projects the public return type deterministically without a fixed inventory', () => {
     const cli: CLI = createCLI();
-    for (const command of [cli.globalCommand, ...cli.commands]) {
-      expect(typeof command.name).toBe('string');
-      expect(typeof command.rawName).toBe('string');
-      for (const option of command.options) {
-        const declaration: {
-          rawName: string;
-          description: string;
-          isBoolean?: boolean;
-          required?: boolean;
-          negated: boolean;
-        } = option;
-        expect(typeof declaration.rawName).toBe('string');
-        expect(typeof declaration.description).toBe('string');
-        expect(typeof declaration.negated).toBe('boolean');
-      }
-    }
-  });
-
-  it('projects the current public definitions without a fixed upstream inventory', () => {
-    const cli = createCLI();
     const data = metadata(cli);
     expect(data.commands.map((command) => command.name)).toEqual(
       cli.commands.map((command) => command.name),
@@ -50,20 +30,22 @@ describe('public createCLI metadata contract (installed Vitest)', () => {
     for (const [index, source] of sourceScopes.entries()) {
       expect(targetScopes[index]).toHaveLength(source.options.length);
       for (const [optionIndex, option] of source.options.entries()) {
-        expect(targetScopes[index][optionIndex]).toMatchObject({
-          rawName: option.rawName,
+        const projected = targetScopes[index][optionIndex];
+        expect(projected).toEqual({
+          flags: expect.any(Array),
           description: option.description ?? '',
-          negated: option.negated,
           valueMode: option.isBoolean ? 'none' : option.required ? 'required' : 'optional',
         });
+        for (const flag of projected.flags) {
+          expect(option.rawName).toContain(flag);
+        }
       }
     }
-    for (const [index, command] of cli.commands.entries()) {
-      expect(data.commands[index]).toMatchObject({
-        rawName: command.rawName,
-        description: command.description ?? '',
-      });
+    for (const command of data.commands) {
+      expect(Object.keys(command).toSorted()).toEqual(['name', 'options']);
     }
+    expect(JSON.parse(JSON.stringify(data))).toEqual(data);
+    expect(metadata()).toEqual(data);
   });
 
   it('is read-only and never calls parse or command actions during extraction', () => {
@@ -86,17 +68,6 @@ describe('public createCLI metadata contract (installed Vitest)', () => {
       Object.freeze(command);
     }
     Object.freeze(cli.commands);
-    expect(metadata(cli)).toEqual(before);
-  });
-
-  it('returns deterministic serializable definitions synchronously', async () => {
-    const cli = createCLI();
-    const before = metadata(cli);
-    expect(JSON.parse(JSON.stringify(before))).toEqual(before);
-    expect(metadata()).toEqual(before);
-    await Promise.resolve();
-    expect(metadata(cli)).toEqual(before);
-    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(metadata(cli)).toEqual(before);
   });
 

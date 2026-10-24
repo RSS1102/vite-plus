@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 const repository = path.resolve(import.meta.dirname, '../../..');
@@ -16,34 +16,12 @@ export function resolveCompletionConsumer(
     );
   }
   const binary = path.resolve(root, supplied);
-  if (!existsSync(binary) || !statSync(binary).isFile()) {
+  const status = existsSync(binary) ? statSync(binary) : undefined;
+  if (!status?.isFile()) {
     throw new Error(`Rust completion consumer does not exist: ${binary}`);
   }
-  const fd = openSync(binary, 'r');
-  const header = Buffer.alloc(4);
-  try {
-    readSync(fd, header, 0, header.length, 0);
-  } finally {
-    closeSync(fd);
-  }
-  const magic = header.toString('hex');
-  const native =
-    process.platform === 'win32'
-      ? magic.startsWith('4d5a')
-      : process.platform === 'darwin'
-        ? [
-            'cffaedfe',
-            'cefaedfe',
-            'feedfacf',
-            'feedface',
-            'cafebabe',
-            'bebafeca',
-            'cafebabf',
-            'bfbafeca',
-          ].includes(magic)
-        : magic === '7f454c46';
-  if (!native || (process.platform !== 'win32' && !(statSync(binary).mode & 0o111))) {
-    throw new Error(`Completion consumer must be a native executable: ${binary}`);
+  if (process.platform !== 'win32' && !(status.mode & 0o111)) {
+    throw new Error(`Completion consumer must be executable: ${binary}`);
   }
   return binary;
 }

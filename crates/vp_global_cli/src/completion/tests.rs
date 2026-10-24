@@ -4,7 +4,7 @@ use tempfile::TempDir;
 use super::*;
 
 fn option(flags: &[&str], mode: &str) -> Value {
-    json!({"rawName":flags.join(", "),"flags":flags,"valueMode":mode,"description":"Option description","negated":false})
+    json!({"flags":flags,"valueMode":mode,"description":"Option description"})
 }
 
 fn metadata_value() -> Value {
@@ -14,15 +14,15 @@ fn metadata_value() -> Value {
             option(&["-w","--watch"],"none"),option(&["--reporter"],"required"),
             option(&["--silent"],"optional"),option(&["-u","--update"],"optional"),
             option(&["-p","--project"],"required"),
-            {"rawName":"--no-color","flags":["--no-color"],"valueMode":"none","negated":true,"description":"Disable colors"}],
+            {"flags":["--no-color"],"valueMode":"none","description":"Disable colors"}],
         "commands":[
-            {"name":"","rawName":"[...filters]","description":"","options":[]},
-            {"name":"run","rawName":"run [...filters]","description":"","options":[]},
-            {"name":"watch","rawName":"watch [...filters]","description":"","options":[]},
-            {"name":"list","rawName":"list [...filters]","description":"","options":[option(&["--filesOnly"],"none"),
-                {"rawName":"--reporter <name>","flags":["--reporter"],"valueMode":"required","negated":false,"description":"List override"}]},
-            {"name":"init","rawName":"init <project>","description":"","options":[]},
-            {"name":"complete","rawName":"complete [shell]","description":"","options":[]}
+            {"name":"","options":[]},
+            {"name":"run","options":[]},
+            {"name":"watch","options":[]},
+            {"name":"list","options":[option(&["--filesOnly"],"none"),
+                {"flags":["--reporter"],"valueMode":"required","description":"List override"}]},
+            {"name":"init","options":[]},
+            {"name":"complete","options":[]}
         ]
     })
 }
@@ -176,6 +176,30 @@ fn checks_both_toolchain_versions_without_running_javascript() {
 }
 
 #[test]
+fn reads_minimal_metadata_and_ignores_previous_display_fields() {
+    let (temp, dist) = fixture();
+    let minimal = read_metadata(&dist, temp.path()).unwrap();
+    let mut previous = metadata_value();
+    for option in previous["globalOptions"].as_array_mut().unwrap() {
+        option["rawName"] = json!("Previous declaration");
+        option["negated"] = json!(false);
+    }
+    for command in previous["commands"].as_array_mut().unwrap() {
+        command["rawName"] = json!("Previous command declaration");
+        command["description"] = json!("Previous description");
+    }
+    fs::write(dist.join("completion/test.json"), previous.to_string()).unwrap();
+    let previous = read_metadata(&dist, temp.path()).unwrap();
+    for data in [minimal, previous] {
+        let mut command = Command::new("vp").subcommand(test_command(&data, &[]).unwrap());
+        command.clone().debug_assert();
+        let args = ["vp", "test", "--no-c"].map(Into::into).to_vec();
+        let result = clap_complete::engine::complete(&mut command, args, 2, None).unwrap();
+        assert_eq!(result[0].get_value().to_string_lossy(), "--no-color");
+    }
+}
+
+#[test]
 fn legacy_vitest_missing_or_stale_metadata_preserves_original_completion() {
     for version in ["3.2.4", "4.1.10"] {
         for missing in [false, true] {
@@ -286,12 +310,12 @@ fn maps_only_available_supported_commands_and_uses_selected_scope() {
     let mut value = metadata_value();
     value["globalOptions"] = json!([option(&["--shared"], "none")]);
     let mut commands = vec![json!({
-        "name":"", "rawName":"[...filters]", "description":"Default",
+        "name":"",
         "options":[option(&["--default-only"], "none")]
     })];
     for name in supported.into_iter().chain(["future-command"]) {
         commands.push(json!({
-            "name":name, "rawName":name, "description":"Synthetic command",
+            "name":name,
             "options":[option(&["--local-only"], "none")]
         }));
     }
@@ -404,13 +428,21 @@ fn implicit_run_scope_follows_vite_plus_dispatch_exceptions() {
 
 #[test]
 fn rejects_schema_boundary_violations() {
+    for field in ["flags", "description", "valueMode"] {
+        let mut missing = metadata_value();
+        missing["globalOptions"][0].as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<Metadata>(missing).is_err(), "{field}");
+    }
+    let mut invalid_arity = metadata_value();
+    invalid_arity["globalOptions"][0]["valueMode"] = json!("unsupported");
+    assert!(serde_json::from_value::<Metadata>(invalid_arity).is_err());
+
     for (pointer, invalid) in [
         ("/commands/1/name", json!("bad/name")),
         ("/commands/1/name", json!("x".repeat(65))),
         ("/globalOptions/0/flags", json!(["-ab", "--coverage"])),
         ("/globalOptions/0/flags", json!([format!("--{}", "x".repeat(257))])),
         ("/globalOptions/0/description", json!("文".repeat(5462))),
-        ("/globalOptions/0/negated", json!(true)),
     ] {
         let mut value = metadata_value();
         *value.pointer_mut(pointer).unwrap() = invalid;

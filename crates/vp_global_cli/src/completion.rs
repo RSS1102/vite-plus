@@ -25,19 +25,15 @@ enum ValueMode {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OptionMetadata {
-    raw_name: String,
     flags: Vec<String>,
     description: String,
     value_mode: ValueMode,
-    negated: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CommandMetadata {
     name: String,
-    raw_name: String,
-    description: String,
     options: Vec<OptionMetadata>,
 }
 
@@ -156,8 +152,6 @@ fn valid_metadata(metadata: &Metadata) -> bool {
         command.name.len() <= 64
             && command.name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
             && names.insert(&command.name)
-            && command.raw_name.len() <= 1024
-            && command.description.len() <= 16384
             && valid_options(&command.options)
     }) && valid_options(&metadata.global_options)
 }
@@ -169,9 +163,7 @@ fn valid_options(options: &[OptionMetadata]) -> bool {
                 && option.flags.len() <= 16
                 && option.flags.iter().any(|flag| flag.starts_with("--"))
                 && option.flags.iter().all(|flag| valid_flag(flag))
-                && option.raw_name.len() <= 1024
                 && option.description.len() <= 16384
-                && (!option.negated || option.flags.iter().any(|flag| flag.starts_with("--no-")))
         })
 }
 
@@ -191,10 +183,7 @@ fn merged_options<'a>(
             if let Some(inherited) = merged.insert(key, option) {
                 // CAC combines declarations; a local declaration is not a
                 // universal override of inherited arity or aliases.
-                if inherited.flags != option.flags
-                    || inherited.value_mode != option.value_mode
-                    || inherited.negated != option.negated
-                {
+                if inherited.flags != option.flags || inherited.value_mode != option.value_mode {
                     return None;
                 }
             }

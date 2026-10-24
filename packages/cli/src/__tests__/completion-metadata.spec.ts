@@ -38,25 +38,19 @@ describe('Vitest completion metadata adapter (synthetic declarations)', () => {
     cli.option('--contractoptional [value]', 'Optional');
     expect(extract(cli).globalOptions).toEqual([
       {
-        rawName: '-b, --contractboolean',
         flags: ['-b', '--contractboolean'],
         description: 'Boolean',
         valueMode: 'none',
-        negated: false,
       },
       {
-        rawName: '-r, --contractrequired <value>',
         flags: ['-r', '--contractrequired'],
         description: 'Required',
         valueMode: 'required',
-        negated: false,
       },
       {
-        rawName: '--contractoptional [value]',
         flags: ['--contractoptional'],
         description: 'Optional',
         valueMode: 'optional',
-        negated: false,
       },
     ]);
   });
@@ -68,25 +62,19 @@ describe('Vitest completion metadata adapter (synthetic declarations)', () => {
     cli.option('--contractcoverage.reporter <name>', 'Dot option');
     expect(extract(cli).globalOptions).toEqual([
       {
-        rawName: '--no-contractcolor',
         flags: ['--no-contractcolor'],
         description: 'Negative',
         valueMode: 'none',
-        negated: true,
       },
       {
-        rawName: '--contractinspect [[host:]port]',
         flags: ['--contractinspect'],
         description: 'Nested placeholder',
         valueMode: 'optional',
-        negated: false,
       },
       {
-        rawName: '--contractcoverage.reporter <name>',
         flags: ['--contractcoverage.reporter'],
         description: 'Dot option',
         valueMode: 'required',
-        negated: false,
       },
     ]);
   });
@@ -116,15 +104,11 @@ describe('Vitest completion metadata adapter (synthetic declarations)', () => {
     expect(extract(cli).commands).toEqual([
       {
         name: 'future-command',
-        rawName: 'future-command [...filters]',
-        description: 'Future description',
         options: [
           {
-            rawName: '--future-flag',
             flags: ['--future-flag'],
             description: 'Future option',
             valueMode: 'none',
-            negated: false,
           },
         ],
       },
@@ -173,7 +157,7 @@ describe('Vitest completion metadata adapter (synthetic declarations)', () => {
     expect(() => extract(cli)).toThrow('Conflicting inherited Vitest option flag');
   });
 
-  it('enforces command uniqueness and byte/count/negation schema boundaries', () => {
+  it('enforces command uniqueness and byte/count schema boundaries', () => {
     const invalidName = fixture();
     invalidName.command('contract');
     invalidName.commands[0].name = 'bad/name';
@@ -185,10 +169,6 @@ describe('Vitest completion metadata adapter (synthetic declarations)', () => {
     const oversized = fixture();
     oversized.option('--contractflag', '文'.repeat(5462));
     expect(() => extract(oversized)).toThrow('Unsupported Vitest option declaration');
-    const negated = fixture();
-    negated.option('--contractflag', 'Flag');
-    negated.globalCommand.options[0].negated = true;
-    expect(() => extract(negated)).toThrow('Unsupported Vitest option declaration');
     const excessive = fixture();
     for (let i = 0; i < 65; i++) {
       excessive.command(`command-${i}`);

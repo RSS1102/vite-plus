@@ -4,26 +4,20 @@
   "vitestVersion": "5.0.5",
   "globalOptions": [
     {
-      "rawName": "--global-option",
       "flags": [
         "--global-option"
       ],
       "description": "global option",
-      "valueMode": "none",
-      "negated": false
+      "valueMode": "none"
     }
   ],
   "commands": [
     {
       "name": "",
-      "rawName": "[...filters]",
-      "description": "",
       "options": []
     },
     {
       "name": "run",
-      "rawName": "run [...filters]",
-      "description": "Run once",
       "options": []
     }
   ]

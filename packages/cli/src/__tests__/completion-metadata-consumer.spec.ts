@@ -26,14 +26,8 @@ function artifact(root: string, relative: string, time = 100) {
   const name = process.platform === 'win32' ? 'vp.exe' : 'vp';
   const file = path.join(root, relative, name);
   mkdirSync(path.dirname(file), { recursive: true });
-  // Header fixtures exercise handoff only; the metadata integration test runs real Rust.
-  const magic =
-    process.platform === 'win32'
-      ? '4d5a0000'
-      : process.platform === 'darwin'
-        ? 'cffaedfe'
-        : '7f454c46';
-  writeFileSync(file, Buffer.from(magic, 'hex'));
+  // Path fixtures exercise handoff only; integration tests execute the real artifact.
+  writeFileSync(file, 'Completion consumer path fixture');
   chmodSync(file, 0o755);
   utimesSync(file, time, time);
   return file;
@@ -99,18 +93,12 @@ describe('completion Rust consumer handoff', () => {
     },
   );
 
-  it('fails on a missing or invalid supplied artifact without borrowing a cached binary', () => {
+  it('fails on a missing file or directory without borrowing a cached binary', () => {
     const root = workspace();
     artifact(root, 'target/debug');
     expect(() =>
       resolveCompletionConsumer(root, { VP_COMPLETION_CONSUMER_BIN: 'missing' }),
     ).toThrow('does not exist');
-    const script = path.join(root, 'script');
-    writeFileSync(script, '#!/usr/bin/env node\n');
-    chmodSync(script, 0o755);
-    expect(() => resolveCompletionConsumer(root, { VP_COMPLETION_CONSUMER_BIN: script })).toThrow(
-      'native executable',
-    );
     expect(() => resolveCompletionConsumer(root, { VP_COMPLETION_CONSUMER_BIN: root })).toThrow(
       'does not exist',
     );
@@ -123,7 +111,7 @@ describe('completion Rust consumer handoff', () => {
       const binary = artifact(root, 'target/debug');
       chmodSync(binary, 0o644);
       expect(() => resolveCompletionConsumer(root, { VP_COMPLETION_CONSUMER_BIN: binary })).toThrow(
-        'native executable',
+        'must be executable',
       );
     },
   );
